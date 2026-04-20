@@ -4,6 +4,8 @@ import rasterio
 from rasterio.io import MemoryFile
 import plotly.graph_objects as go
 from sklearn.cluster import KMeans
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 import io
 import warnings
 warnings.filterwarnings("ignore")
@@ -64,7 +66,6 @@ HEALTH_THRESHOLDS = [
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def read_band_bytes(file_bytes, band_num=1):
-    """Cache by raw bytes — works correctly with Streamlit's cache."""
     with MemoryFile(file_bytes) as memfile:
         with memfile.open() as src:
             data = src.read(band_num).astype(np.float32)
@@ -79,7 +80,6 @@ def read_band_bytes(file_bytes, band_num=1):
     return data, profile, meta
 
 def read_band_from_file(uploaded_file, band_num=1):
-    """Read file bytes once, then use cached function."""
     file_bytes = uploaded_file.read()
     uploaded_file.seek(0)
     return read_band_bytes(file_bytes, band_num)
@@ -92,7 +92,6 @@ def safe_divide(num, den, eps=1e-10):
 
 @st.cache_data(show_spinner=False)
 def compute_index(index_name, r=None, nir=None, g=None, b=None):
-    """Each band passed as separate array — avoids dict caching issue."""
     if index_name == "NDVI":
         return safe_divide(nir - r, nir + r)
     elif index_name == "VARI":
@@ -114,7 +113,7 @@ def run_kmeans(index_array, k):
     result[mask] = labels
     return result.reshape(index_array.shape)
 
-MAX_DISPLAY_PX = 500
+MAX_DISPLAY_PX = 600
 
 def downsample(array, max_dim=MAX_DISPLAY_PX):
     h, w = array.shape
@@ -127,104 +126,57 @@ def downsample(array, max_dim=MAX_DISPLAY_PX):
     col_idx = np.linspace(0, w - 1, new_w, dtype=int)
     return array[np.ix_(row_idx, col_idx)]
 
-def vectorized_health_labels(idx_ds):
-    labels = np.full(idx_ds.shape, "NoData", dtype=object)
-    for lo, hi, label, _, _, _ in HEALTH_THRESHOLDS:
-        mask = (idx_ds >= lo) & (idx_ds < hi)
-        labels[mask] = label
-    return labels
+@st.cache_data(show_spinner=False)
+def render_index_image(index_array, index_name):
+    """Render index map as a PNG image — much lighter than Plotly heatmap."""
+    ds = downsample(index_array)
 
-def build_hover_arrays(index_array, bands, cluster_array):
-    idx_ds = downsample(index_array)
-    cl_ds  = downsample(cluster_array)
-    health_labels = vectorized_health_labels(idx_ds)
-    # Only send health label and cluster — skip raw band DNs to reduce payload
-    custom = [health_labels, cl_ds.astype(str)]
-    return idx_ds, np.stack(custom, axis=-1), []
+    if index_name == "NDVI":
+        colors = ["#1a6fa8", "#c8a45e", "#f5c518", "#8bc34a", "#4caf50", "#2e7d32", "#1b5e20"]
+        cmap = mcolors.LinearSegmentedColormap.from_list("ndvi", colors)
+    else:
+        cmap = plt.cm.RdYlGn
 
-def ndvi_health_colorscale():
-    return [
-        [0.0,  "#1a6fa8"],
-        [0.27, "#c8a45e"],
-        [0.37, "#f5c518"],
-        [0.50, "#8bc34a"],
-        [0.65, "#4caf50"],
-        [0.82, "#2e7d32"],
-        [1.0,  "#1b5e20"],
-    ]
+    vmin, vmax = (-1, 1) if index_name in ("NDVI", "NDWI") else (-0.5, 0.5)
 
-def make_plotly_map(index_array, cluster_array, bands, index_name):
-    idx_ds, custom, band_names = build_hover_arrays(index_array, bands, cluster_array)
-    extra_tmpl = "".join(
-        f"{bn}: %{{customdata[{i+2}]:.3f}}<br>"
-        for i, bn in enumerate(band_names)
-    )
-    hover_tmpl = (
-    f"<b>{index_name}: %{{z:.4f}}</b><br>"
-    "Health: %{customdata[0]}<br>"
-    "Cluster: %{customdata[1]}<extra></extra>"
-    )
-    colorscale = ndvi_health_colorscale() if index_name == "NDVI" else "RdYlGn"
-    zmin, zmax = (-1, 1) if index_name in ("NDVI", "NDWI") else (-0.5, 0.5)
-    fig = go.Figure(go.Heatmap(
-        z=idx_ds,
-        colorscale=colorscale,
-        zmin=zmin,
-        zmax=zmax,
-        customdata=custom,
-        hovertemplate=hover_tmpl,
-        colorbar=dict(title=dict(text=index_name, side="right"), thickness=14, len=0.9),
-        showscale=True,
-    ))
-    fig.update_layout(
-        margin=dict(l=0, r=0, t=0, b=0),
-        height=480,
-        xaxis=dict(showticklabels=False, showgrid=False),
-        yaxis=dict(showticklabels=False, showgrid=False, autorange="reversed"),
-        hoverlabel=dict(bgcolor="white", bordercolor="#cccccc", font_size=13),
-        hovermode="closest",
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-    )
-    return fig
+    fig, ax = plt.subplots(figsize=(10, 6), dpi=120)
+    im = ax.imshow(ds, cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
+    plt.colorbar(im, ax=ax, label=index_name, fraction=0.03, pad=0.02)
+    ax.axis("off")
+    plt.tight_layout(pad=0.5)
 
-def make_cluster_fig(cluster_array, k):
-    display = downsample(cluster_array).astype(float)
-    display[display == -9999] = np.nan
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", bbox_inches="tight", dpi=120)
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+@st.cache_data(show_spinner=False)
+def render_cluster_image(cluster_array, k):
+    """Render cluster map as a PNG image."""
+    ds = downsample(cluster_array).astype(float)
+    ds[ds == -9999] = np.nan
+
     cluster_colors = [
         "#1565c0", "#2e7d32", "#ef6c00",
         "#6a1b9a", "#c62828", "#00695c", "#f9a825", "#4e342e"
     ]
-    if k == 1:
-        colorscale = [[0.0, cluster_colors[0]], [1.0, cluster_colors[0]]]
-    else:
-        colorscale = [[i / (k - 1), cluster_colors[i % len(cluster_colors)]] for i in range(k)]
-    fig = go.Figure(go.Contour(
-        z=display,
-        colorscale=colorscale,
-        zmin=0, zmax=k - 1,
-        ncontours=k * 6,
-        contours=dict(coloring="fill", showlines=False),
-        hovertemplate="Cluster: %{z:.2f}<br>Pixel: (%{x}, %{y})<extra></extra>",
-        colorbar=dict(
-            title=dict(text="Cluster", side="right"),
-            thickness=14,
-            tickvals=list(range(k)),
-            ticktext=[f"Cluster {i}" for i in range(k)],
-            len=0.9,
-        ),
-        line_smoothing=1.3,
-    ))
-    fig.update_layout(
-        margin=dict(l=0, r=0, t=0, b=0),
-        height=480,
-        xaxis=dict(showticklabels=False, showgrid=False, zeroline=False),
-        yaxis=dict(showticklabels=False, showgrid=False, autorange="reversed", zeroline=False),
-        hoverlabel=dict(bgcolor="white", bordercolor="#ccc", font_size=13),
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
+    cmap = mcolors.LinearSegmentedColormap.from_list(
+        "clusters", [cluster_colors[i % len(cluster_colors)] for i in range(k)], N=k
     )
-    return fig
+
+    fig, ax = plt.subplots(figsize=(10, 6), dpi=120)
+    im = ax.imshow(ds, cmap=cmap, vmin=0, vmax=k - 1, aspect="auto")
+    cbar = plt.colorbar(im, ax=ax, fraction=0.03, pad=0.02, ticks=range(k))
+    cbar.set_ticklabels([f"Cluster {i}" for i in range(k)])
+    ax.axis("off")
+    plt.tight_layout(pad=0.5)
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", bbox_inches="tight", dpi=120)
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
 
 def array_to_geotiff_bytes(array, profile):
     profile = profile.copy()
@@ -355,14 +307,12 @@ if run_btn:
         progress_bar = st.progress(0, text="Starting analysis...")
         status = st.empty()
 
-        # Step 1 — band swap check
         progress_bar.progress(10, text="Step 1 / 4 — Checking band values...")
         status.caption("Step 1 / 4 — Checking band values...")
         if "red" in bands and "nir" in bands:
             if np.nanmean(bands["red"]) > np.nanmean(bands["nir"]):
                 st.warning("Red band mean > NIR mean — bands may be swapped. Check assignments.")
 
-        # Step 2 — compute index (pass arrays individually for proper caching)
         progress_bar.progress(25, text=f"Step 2 / 4 — Computing {selected_index}...")
         status.caption(f"Step 2 / 4 — Computing {selected_index}...")
         idx_arr = compute_index(
@@ -373,14 +323,12 @@ if run_btn:
             b=bands.get("blue"),
         )
 
-        # Step 3 — clustering
         progress_bar.progress(55, text=f"Step 3 / 4 — Running K-Means (K={k_val})...")
         status.caption(f"Step 3 / 4 — Running K-Means (K={k_val})...")
         cl_arr = run_kmeans(idx_arr, k_val)
 
-        # Step 4 — store results
-        progress_bar.progress(80, text="Step 4 / 4 — Preparing display...")
-        status.caption("Step 4 / 4 — Preparing display...")
+        progress_bar.progress(80, text="Step 4 / 4 — Rendering maps...")
+        status.caption("Step 4 / 4 — Rendering maps...")
         st.session_state.index_array   = idx_arr
         st.session_state.cluster_array = cl_arr
         st.session_state.profile       = profile_ref
@@ -412,9 +360,9 @@ if st.session_state.index_array is not None:
     tab1, tab2 = st.tabs([f"{idx_name} Map", "Cluster Map"])
 
     with tab1:
-        st.markdown(f"**Hover over the map** to see {idx_name} value, health, band values and cluster.")
-        fig_idx = make_plotly_map(idx_arr, cl_arr, bands_used, idx_name)
-        st.plotly_chart(fig_idx, use_container_width=True)
+        st.markdown(f"**{idx_name} vegetation index map** — colour scale shown on the right.")
+        img_bytes = render_index_image(idx_arr, idx_name)
+        st.image(img_bytes, use_container_width=True)
 
         st.markdown("##### Crop health scale")
         cols = st.columns(len(HEALTH_THRESHOLDS))
@@ -428,9 +376,9 @@ if st.session_state.index_array is not None:
                 )
 
     with tab2:
-        st.markdown(f"**K = {k_val} clusters** — hover to see cluster at each pixel.")
-        fig_cl = make_cluster_fig(cl_arr, k_val)
-        st.plotly_chart(fig_cl, use_container_width=True)
+        st.markdown(f"**K = {k_val} cluster zones** — each colour represents a distinct vegetation zone.")
+        cl_img_bytes = render_cluster_image(cl_arr, k_val)
+        st.image(cl_img_bytes, use_container_width=True)
 
         st.markdown("##### Cluster distribution")
         dist_cols = st.columns(k_val)
@@ -442,7 +390,7 @@ if st.session_state.index_array is not None:
             with dist_cols[ki]:
                 st.markdown(
                     f'<div style="background:{cluster_colors[ki]}22;border:0.5px solid {cluster_colors[ki]};'
-                    f'border-radius:6px;padding:8px;text-align:center;">'
+                    f'border-radius:6psx;padding:8px;text-align:center;">'
                     f'<div style="font-size:18px;font-weight:600;color:{cluster_colors[ki]};">{pct:.1f}%</div>'
                     f'<div style="font-size:11px;color:#555;">Cluster {ki}</div>'
                     f'<div style="font-size:10px;color:#888;">{count:,} px</div></div>',
