@@ -74,6 +74,7 @@ def get_health(ndvi_val):
     return HEALTH_THRESHOLDS[-1][2], HEALTH_THRESHOLDS[-1][3], HEALTH_THRESHOLDS[-1][4], HEALTH_THRESHOLDS[-1][5]
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
 def read_band_from_file(uploaded_file, band_num=1):
     bytes_data = uploaded_file.read()
     uploaded_file.seek(0)
@@ -96,6 +97,7 @@ def safe_divide(num, den, eps=1e-10):
     result = np.where(np.abs(den) < eps, np.nan, result)
     return result
 
+@st.cache_data(show_spinner=False)
 def compute_index(index_name, bands: dict):
     r = bands.get("red")
     nir = bands.get("nir")
@@ -112,32 +114,30 @@ def compute_index(index_name, bands: dict):
         L = 0.5
         return safe_divide(nir - r, nir + r + L) * (1 + L)
 
+@st.cache_data(show_spinner=False)
 def run_kmeans(index_array, k):
     flat = index_array.flatten()
     mask = np.isfinite(flat)
     valid = flat[mask].reshape(-1, 1)
-    km = KMeans(n_clusters=k, random_state=42, n_init=10)
+    km = KMeans(n_clusters=k, random_state=42, n_init=3)
     labels = km.fit_predict(valid)
     result = np.full(flat.shape, -9999, dtype=np.int32)
     result[mask] = labels
     return result.reshape(index_array.shape)
 
-MAX_DISPLAY_PX = 800  # max dimension for display — keeps Plotly payload small
+MAX_DISPLAY_PX = 800
 
 def downsample(array, max_dim=MAX_DISPLAY_PX):
-    """Downsample a 2D array so its largest dimension <= max_dim."""
     h, w = array.shape
     if max(h, w) <= max_dim:
         return array
     scale = max_dim / max(h, w)
     new_h, new_w = max(1, int(h * scale)), max(1, int(w * scale))
-    # slice-based downsample — fast and avoids scipy dependency
     row_idx = np.linspace(0, h - 1, new_h, dtype=int)
     col_idx = np.linspace(0, w - 1, new_w, dtype=int)
     return array[np.ix_(row_idx, col_idx)]
 
 def vectorized_health_labels(idx_ds):
-    """Assign health label to every pixel using vectorized numpy — no Python loop."""
     labels = np.full(idx_ds.shape, "NoData", dtype=object)
     for lo, hi, label, _, _, _ in HEALTH_THRESHOLDS:
         mask = (idx_ds >= lo) & (idx_ds < hi)
@@ -229,7 +229,6 @@ def make_cluster_fig(cluster_array, k):
         "#6a1b9a", "#c62828", "#00695c", "#f9a825", "#4e342e"
     ]
 
-    # build a smooth colorscale anchored exactly at each cluster value
     if k == 1:
         colorscale = [[0.0, cluster_colors[0]], [1.0, cluster_colors[0]]]
     else:
@@ -243,10 +242,10 @@ def make_cluster_fig(cluster_array, k):
         colorscale=colorscale,
         zmin=0,
         zmax=k - 1,
-        ncontours=k * 6,          # more contour lines = smoother gradient between zones
+        ncontours=k * 6,
         contours=dict(
-            coloring="fill",       # filled contours — gives the smooth painted look
-            showlines=False,       # no harsh borders between zones
+            coloring="fill",
+            showlines=False,
         ),
         hovertemplate="Cluster: %{z:.2f}<br>Pixel: (%{x}, %{y})<extra></extra>",
         colorbar=dict(
@@ -256,7 +255,7 @@ def make_cluster_fig(cluster_array, k):
             ticktext=[f"Cluster {i}" for i in range(k)],
             len=0.9,
         ),
-        line_smoothing=1.3,        # smooths the contour edges
+        line_smoothing=1.3,
     ))
 
     fig.update_layout(
@@ -428,7 +427,7 @@ if run_btn:
         st.error("Please upload all required bands before running.")
     elif not error_msg:
         progress_bar = st.progress(0, text="Starting analysis...")
-        status      = st.empty()
+        status = st.empty()
 
         # Step 1 — band swap check
         status.caption("Step 1 / 4 — Checking band values...")
@@ -465,9 +464,9 @@ if run_btn:
 
 # ── OUTPUT ────────────────────────────────────────────────────────────────────
 if st.session_state.index_array is not None:
-    idx_arr   = st.session_state.index_array
-    cl_arr    = st.session_state.cluster_array
-    idx_name  = st.session_state.index_name
+    idx_arr    = st.session_state.index_array
+    cl_arr     = st.session_state.cluster_array
+    idx_name   = st.session_state.index_name
     bands_used = st.session_state.bands_used
 
     st.markdown("---")
@@ -493,7 +492,6 @@ if st.session_state.index_array is not None:
         fig_idx = make_plotly_map(idx_arr, cl_arr, bands_used, idx_name)
         st.plotly_chart(fig_idx, use_container_width=True)
 
-        # health legend
         st.markdown("##### Crop health scale")
         cols = st.columns(len(HEALTH_THRESHOLDS))
         for i, (lo, hi, label, bg, tc, desc) in enumerate(HEALTH_THRESHOLDS):
@@ -510,7 +508,6 @@ if st.session_state.index_array is not None:
         fig_cl = make_cluster_fig(cl_arr, k_val)
         st.plotly_chart(fig_cl, use_container_width=True)
 
-        # cluster pixel distribution
         st.markdown("##### Cluster distribution")
         dist_cols = st.columns(k_val)
         cluster_colors = ["#1565c0","#2e7d32","#ef6c00","#6a1b9a","#c62828","#00695c","#f9a825","#4e342e"]
