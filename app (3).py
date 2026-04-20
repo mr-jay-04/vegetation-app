@@ -14,7 +14,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# ── CSS ──────────────────────────────────────────────────────────────────────
+# ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
     .block-container { padding-top: 1.5rem; padding-bottom: 1rem; }
@@ -26,210 +26,205 @@ st.markdown("""
         padding: 12px 16px;
     }
     .section-title {
-        font-size: 12px;
+        font-size: 11px;
         font-weight: 600;
         color: #888;
         text-transform: uppercase;
-        letter-spacing: 0.05em;
-        margin-bottom: 6px;
+        letter-spacing: 0.06em;
+        margin-bottom: 4px;
+    }
+    .chip-available {
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 12px;
+        font-size: 12px;
+        font-weight: 600;
+        background: #eafaf1;
+        color: #1e8449;
+        margin: 2px;
+    }
+    .chip-unavailable {
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 12px;
+        font-size: 12px;
+        background: #f4f4f4;
+        color: #aaa;
+        margin: 2px;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
+# Maps each index to the bands it needs
 INDEX_BANDS = {
     "NDVI": ["red", "nir"],
-    "VARI": ["red", "green", "blue"],
     "NDWI": ["green", "nir"],
     "SAVI": ["red", "nir"],
+    "VARI": ["red", "green", "blue"],
 }
 
 INDEX_FORMULAS = {
-    "NDVI": "( NIR − Red ) / ( NIR + Red )",
-    "VARI": "( Green − Red ) / ( Green + Red − Blue )",
-    "NDWI": "( Green − NIR ) / ( Green + NIR )",
-    "SAVI": "( NIR − Red ) / ( NIR + Red + 0.5 )  ×  1.5",
+    "NDVI": "(NIR − Red) / (NIR + Red)",
+    "NDWI": "(Green − NIR) / (Green + NIR)",
+    "SAVI": "((NIR − Red) / (NIR + Red + 0.5)) × 1.5",
+    "VARI": "(Green − Red) / (Green + Red − Blue)",
+}
+
+INDEX_DESC = {
+    "NDVI": "Overall vegetation health",
+    "NDWI": "Water content in vegetation",
+    "SAVI": "Vegetation with soil correction",
+    "VARI": "Visible greenness (RGB only)",
+}
+
+# Maps each fusion to the two indices it needs
+FUSION_REQUIRES = {
+    "NDVI + NDWI — Water stress":       ("NDVI", "NDWI"),
+    "NDVI + SAVI — Soil interference":  ("NDVI", "SAVI"),
+    "NDVI + VARI — Hidden stress":      ("NDVI", "VARI"),
 }
 
 HEALTH_THRESHOLDS = [
-    (-1.0,  -0.1, "Water / Non-veg",  "#cfe2f3", "#1a5276", "Surface water or bare non-vegetated area."),
-    (-0.1,   0.1, "Bare soil",        "#fdebd0", "#784212", "Exposed soil. Field may be fallow or pre-emergence."),
-    ( 0.1,   0.2, "Very sparse",      "#fadbd8", "#922b21", "Very low density. Possible crop failure or early seedling stage."),
-    ( 0.2,  0.35, "Sparse / Stressed","#fef9e7", "#7d6608", "Crop is stressed — possible water deficit or nutrient stress."),
-    (0.35,   0.5, "Moderate",         "#eafaf1", "#1e8449", "Moderate vigour. Crop is growing but may need attention."),
-    ( 0.5,  0.65, "Healthy",          "#d5f5e3", "#1a5e34", "Good canopy. Crop appears healthy with adequate resources."),
-    ( 0.65,  1.0, "Very Healthy",     "#a9dfbf", "#0b3d25", "Dense vigorous canopy. Optimal conditions and high biomass."),
+    (-1.0,  -0.1, "Water / Non-veg",   "#cfe2f3", "#1a5276"),
+    (-0.1,   0.1, "Bare soil",         "#fdebd0", "#784212"),
+    ( 0.1,   0.2, "Very sparse",       "#fadbd8", "#922b21"),
+    ( 0.2,  0.35, "Sparse / Stressed", "#fef9e7", "#7d6608"),
+    (0.35,   0.5, "Moderate",          "#eafaf1", "#1e8449"),
+    ( 0.5,  0.65, "Healthy",           "#d5f5e3", "#1a5e34"),
+    ( 0.65,  1.0, "Very Healthy",      "#a9dfbf", "#0b3d25"),
 ]
 
-def get_health_label(val):
-    for lo, hi, label, _, _, _ in HEALTH_THRESHOLDS:
-        if lo <= val < hi:
-            return label
-    return "Very Healthy"
+WATER_STRESS_ZONES = {
+    0: ("Bare / Dry soil",       "#8B5E3C"),
+    1: ("Waterlogged",           "#2980B9"),
+    2: ("Water-stressed veg",    "#F39C12"),
+    3: ("Healthy vegetation",    "#27AE60"),
+}
 
-# ── HELPERS ───────────────────────────────────────────────────────────────────
+HIDDEN_STRESS_ZONES = {
+    0: ("No anomaly",        "#B2BABB"),
+    1: ("Hidden stress",     "#E74C3C"),
+    2: ("Confirmed healthy", "#27AE60"),
+}
+
+# ── SESSION STATE INIT ────────────────────────────────────────────────────────
+_state_defaults = {
+    "bands":           {},       # {"red": np.array, "nir": np.array, ...}
+    "profile_ref":     None,
+    "computed_indices":{},       # {"NDVI": np.array, "NDWI": np.array, ...}
+    "cluster_results": {},       # {"NDVI": np.array, ...}
+    "upload_mode":     None,
+}
+for k, v in _state_defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+# ── CORE HELPERS ──────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def read_band_bytes(file_bytes, band_num=1):
     with MemoryFile(file_bytes) as memfile:
         with memfile.open() as src:
-            data = src.read(band_num).astype(np.float32)
+            data    = src.read(band_num).astype(np.float32)
             profile = src.profile.copy()
-            meta = {
-                "crs": str(src.crs),
-                "transform": src.transform,
-                "width": src.width,
-                "height": src.height,
+            meta    = {
+                "crs": str(src.crs), "transform": src.transform,
+                "width": src.width,  "height": src.height,
                 "count": src.count,
             }
     return data, profile, meta
 
 def read_band_from_file(uploaded_file, band_num=1):
-    file_bytes = uploaded_file.read()
+    fb = uploaded_file.read()
     uploaded_file.seek(0)
-    return read_band_bytes(file_bytes, band_num)
+    return read_band_bytes(fb, band_num)
 
 def safe_divide(num, den, eps=1e-10):
-    den_safe = np.where(np.abs(den) < eps, eps, den)
-    result = num / den_safe
-    result = np.where(np.abs(den) < eps, np.nan, result)
-    return result
+    den_s  = np.where(np.abs(den) < eps, eps, den)
+    result = num / den_s
+    return np.where(np.abs(den) < eps, np.nan, result)
 
 @st.cache_data(show_spinner=False)
-def compute_index(index_name, r=None, nir=None, g=None, b=None):
-    if index_name == "NDVI":
-        return safe_divide(nir - r, nir + r)
-    elif index_name == "VARI":
-        return safe_divide(g - r, g + r - b)
-    elif index_name == "NDWI":
-        return safe_divide(g - nir, g + nir)
-    elif index_name == "SAVI":
-        L = 0.5
-        return safe_divide(nir - r, nir + r + L) * (1 + L)
+def _compute_index_cached(name, r=None, nir=None, g=None, b=None):
+    if name == "NDVI": return safe_divide(nir - r,   nir + r)
+    if name == "NDWI": return safe_divide(g   - nir, g   + nir)
+    if name == "SAVI": return safe_divide(nir - r,   nir + r + 0.5) * 1.5
+    if name == "VARI": return safe_divide(g   - r,   g   + r - b)
+
+def compute_and_store(name: str):
+    """Compute a single index from stored bands and save to session_state."""
+    bd = st.session_state.bands
+    arr = _compute_index_cached(
+        name,
+        r=bd.get("red"), nir=bd.get("nir"),
+        g=bd.get("green"), b=bd.get("blue"),
+    )
+    st.session_state.computed_indices[name] = arr
+    return arr
 
 @st.cache_data(show_spinner=False)
-def run_kmeans(index_array, k):
-    flat = index_array.flatten()
-    mask = np.isfinite(flat)
+def _run_kmeans_cached(index_array, k, sample_size=50_000):
+    flat  = index_array.flatten()
+    mask  = np.isfinite(flat)
     valid = flat[mask].reshape(-1, 1)
-    km = KMeans(n_clusters=k, random_state=42, n_init=3)
-    labels = km.fit_predict(valid)
-    result = np.full(flat.shape, -9999, dtype=np.int32)
+    km    = KMeans(n_clusters=k, random_state=42, n_init=3)
+    if len(valid) > sample_size:
+        rng  = np.random.default_rng(42)
+        sidx = rng.choice(len(valid), size=sample_size, replace=False)
+        km.fit(valid[sidx])
+        labels = km.predict(valid)
+    else:
+        labels = km.fit_predict(valid)
+    result       = np.full(flat.shape, -9999, dtype=np.int32)
     result[mask] = labels
     return result.reshape(index_array.shape)
 
-# Keep display small — this is the key to preventing browser freeze
 MAX_DISPLAY_PX = 500
 
 def downsample(array, max_dim=MAX_DISPLAY_PX):
     h, w = array.shape
     if max(h, w) <= max_dim:
         return array
-    scale = max_dim / max(h, w)
-    new_h = max(1, int(h * scale))
-    new_w = max(1, int(w * scale))
+    scale   = max_dim / max(h, w)
+    new_h   = max(1, int(h * scale))
+    new_w   = max(1, int(w * scale))
     row_idx = np.linspace(0, h - 1, new_h, dtype=int)
     col_idx = np.linspace(0, w - 1, new_w, dtype=int)
     return array[np.ix_(row_idx, col_idx)]
 
-def vectorized_health_labels(idx_ds):
-    labels = np.full(idx_ds.shape, "Very Healthy", dtype=object)
-    for lo, hi, label, _, _, _ in HEALTH_THRESHOLDS:
-        mask = (idx_ds >= lo) & (idx_ds < hi)
-        labels[mask] = label
+def vectorized_health_labels(arr):
+    labels = np.full(arr.shape, "Very Healthy", dtype=object)
+    for lo, hi, label, _, _ in HEALTH_THRESHOLDS:
+        labels[(arr >= lo) & (arr < hi)] = label
     return labels
 
-# ── PLOTLY MAPS (lightweight — only z + health label in hover) ────────────────
-@st.cache_data(show_spinner=False)
-def make_index_fig(index_array, index_name):
-    ds = downsample(index_array)
+def available_indices(bands: dict) -> dict:
+    """Returns {index_name: True/False} based on which bands are present."""
+    return {
+        name: all(b in bands for b in needed)
+        for name, needed in INDEX_BANDS.items()
+    }
 
-    # Build health label array for hover
-    health = vectorized_health_labels(ds)
+def zone_stats_html(zone_array, zone_dict, nodata_val=-1):
+    total = int(np.sum(zone_array != nodata_val))
+    cards = ""
+    for zid, info in zone_dict.items():
+        color = info[1]; label = info[0]
+        count = int(np.sum(zone_array == zid))
+        pct   = count / total * 100 if total > 0 else 0
+        cards += (
+            f'<div style="flex:1;min-width:130px;background:{color}22;border:0.5px solid {color};'
+            f'border-radius:8px;padding:10px;text-align:center;">'
+            f'<div style="font-size:17px;font-weight:600;color:{color};">{pct:.1f}%</div>'
+            f'<div style="font-size:12px;color:#444;margin-top:2px;">{label}</div>'
+            f'<div style="font-size:10px;color:#888;">{count:,} px</div></div>'
+        )
+    return f'<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;">{cards}</div>'
 
-    if index_name == "NDVI":
-        colors = ["#1a6fa8", "#c8a45e", "#f5c518", "#8bc34a", "#4caf50", "#2e7d32", "#1b5e20"]
-        colorscale = [[i / (len(colors) - 1), c] for i, c in enumerate(colors)]
-    else:
-        colorscale = "RdYlGn"
-
-    zmin, zmax = (-1, 1) if index_name in ("NDVI", "NDWI") else (-0.5, 0.5)
-
-    fig = go.Figure(go.Heatmap(
-        z=ds,
-        colorscale=colorscale,
-        zmin=zmin,
-        zmax=zmax,
-        customdata=health,
-        hovertemplate=(
-            f"<b>{index_name}: %{{z:.4f}}</b><br>"
-            "Health: %{customdata}<br>"
-            "Pixel: (%{x}, %{y})<extra></extra>"
-        ),
-        colorbar=dict(
-            title=dict(text=index_name, side="right"),
-            thickness=14,
-            len=0.9,
-        ),
-    ))
-    fig.update_layout(
-        margin=dict(l=0, r=0, t=0, b=0),
-        height=480,
-        xaxis=dict(showticklabels=False, showgrid=False),
-        yaxis=dict(showticklabels=False, showgrid=False, autorange="reversed"),
-        hoverlabel=dict(bgcolor="white", bordercolor="#ccc", font_size=13),
-        hovermode="closest",
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-    )
-    return fig
-
-@st.cache_data(show_spinner=False)
-def make_cluster_fig(cluster_array, k):
-    ds = downsample(cluster_array).astype(float)
-    ds[ds == -9999] = np.nan
-
-    cluster_colors = [
-        "#1565c0", "#2e7d32", "#ef6c00",
-        "#6a1b9a", "#c62828", "#00695c", "#f9a825", "#4e342e"
-    ]
-    colorscale = [
-        [i / (k - 1) if k > 1 else 0, cluster_colors[i % len(cluster_colors)]]
-        for i in range(k)
-    ]
-
-    fig = go.Figure(go.Heatmap(
-        z=ds,
-        colorscale=colorscale,
-        zmin=0,
-        zmax=k - 1,
-        hovertemplate="<b>Cluster: %{z:.0f}</b><br>Pixel: (%{x}, %{y})<extra></extra>",
-        colorbar=dict(
-            title=dict(text="Cluster", side="right"),
-            thickness=14,
-            tickvals=list(range(k)),
-            ticktext=[f"Cluster {i}" for i in range(k)],
-            len=0.9,
-        ),
-    ))
-    fig.update_layout(
-        margin=dict(l=0, r=0, t=0, b=0),
-        height=480,
-        xaxis=dict(showticklabels=False, showgrid=False),
-        yaxis=dict(showticklabels=False, showgrid=False, autorange="reversed"),
-        hoverlabel=dict(bgcolor="white", bordercolor="#ccc", font_size=13),
-        hovermode="closest",
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-    )
-    return fig
-
-# ── FUSION ANALYSIS ───────────────────────────────────────────────────────────
-
-# ── Shared layout helper ──────────────────────────────────────────────────────
+# ── PLOTLY FIGURES ────────────────────────────────────────────────────────────
 def _base_layout(height=480):
     return dict(
-        margin=dict(l=0, r=0, t=0, b=0),
-        height=height,
+        margin=dict(l=0, r=0, t=0, b=0), height=height,
         xaxis=dict(showticklabels=False, showgrid=False, zeroline=False),
         yaxis=dict(showticklabels=False, showgrid=False, autorange="reversed", zeroline=False),
         hoverlabel=dict(bgcolor="white", bordercolor="#ccc", font_size=13),
@@ -238,282 +233,177 @@ def _base_layout(height=480):
         paper_bgcolor="rgba(0,0,0,0)",
     )
 
-# ── (A) NDVI + NDWI — Water Stress Detection ─────────────────────────────────
-# Classifies every pixel into 4 ecological zones based on two thresholds.
-# NDVI threshold = 0.3  (below → low vegetation)
-# NDWI threshold = 0.0  (below → low water content)
-
-WATER_STRESS_ZONES = {
-    0: ("Bare / Dry soil",          "#8B5E3C", "#fff"),   # low NDVI + low NDWI
-    1: ("Waterlogged / Flooded",    "#2980B9", "#fff"),   # low NDVI + high NDWI
-    2: ("Water-stressed veg",       "#F39C12", "#fff"),   # high NDVI + low NDWI  ← hidden stress
-    3: ("Healthy vegetation",       "#27AE60", "#fff"),   # high NDVI + high NDWI
-}
+@st.cache_data(show_spinner=False)
+def make_index_fig(index_array, index_name):
+    ds     = downsample(index_array)
+    health = vectorized_health_labels(ds)
+    if index_name == "NDVI":
+        cols = ["#1a6fa8","#c8a45e","#f5c518","#8bc34a","#4caf50","#2e7d32","#1b5e20"]
+        cscale = [[i / (len(cols)-1), c] for i, c in enumerate(cols)]
+    else:
+        cscale = "RdYlGn"
+    zmin, zmax = (-1,1) if index_name in ("NDVI","NDWI") else (-0.5, 0.5)
+    fig = go.Figure(go.Heatmap(
+        z=ds, colorscale=cscale, zmin=zmin, zmax=zmax,
+        customdata=health,
+        hovertemplate=f"<b>{index_name}: %{{z:.4f}}</b><br>Health: %{{customdata}}<br>Pixel: (%{{x}}, %{{y}})<extra></extra>",
+        colorbar=dict(title=dict(text=index_name, side="right"), thickness=14, len=0.9),
+    ))
+    fig.update_layout(**_base_layout())
+    return fig
 
 @st.cache_data(show_spinner=False)
-def compute_water_stress_zones(ndvi_array, ndwi_array,
-                                ndvi_thresh=0.3, ndwi_thresh=0.0):
-    """
-    Returns an int8 zone map:
-      0 = Bare/Dry   1 = Waterlogged   2 = Water-stressed   3 = Healthy
-    NaN where either input is NaN.
-    """
-    valid = np.isfinite(ndvi_array) & np.isfinite(ndwi_array)
-    zones = np.full(ndvi_array.shape, -1, dtype=np.int8)
-
-    hi_ndvi = ndvi_array >= ndvi_thresh
-    hi_ndwi = ndwi_array >= ndwi_thresh
-
-    zones[valid & ~hi_ndvi & ~hi_ndwi] = 0   # bare/dry
-    zones[valid & ~hi_ndvi &  hi_ndwi] = 1   # waterlogged
-    zones[valid &  hi_ndvi & ~hi_ndwi] = 2   # water-stressed
-    zones[valid &  hi_ndvi &  hi_ndwi] = 3   # healthy
-    return zones
+def make_cluster_fig(cluster_array, k):
+    ds = downsample(cluster_array).astype(float)
+    ds[ds == -9999] = np.nan
+    colors = ["#1565c0","#2e7d32","#ef6c00","#6a1b9a","#c62828","#00695c","#f9a825","#4e342e"]
+    cscale = [[i/(k-1) if k>1 else 0, colors[i % len(colors)]] for i in range(k)]
+    fig = go.Figure(go.Heatmap(
+        z=ds, colorscale=cscale, zmin=0, zmax=k-1,
+        hovertemplate="<b>Cluster: %{z:.0f}</b><br>Pixel: (%{x}, %{y})<extra></extra>",
+        colorbar=dict(title=dict(text="Cluster", side="right"), thickness=14,
+                      tickvals=list(range(k)), ticktext=[f"Cluster {i}" for i in range(k)], len=0.9),
+    ))
+    fig.update_layout(**_base_layout())
+    return fig
 
 @st.cache_data(show_spinner=False)
 def make_water_stress_fig(zone_array, ndvi_ds, ndwi_ds):
-    ds = downsample(zone_array.astype(float))
+    ds      = downsample(zone_array.astype(float))
+    ds[ds == -1] = np.nan
     ds_ndvi = downsample(ndvi_ds)
     ds_ndwi = downsample(ndwi_ds)
-    ds[ds == -1] = np.nan
-
-    # Build zone label array for hover
-    zone_labels = np.full(ds.shape, "NoData", dtype=object)
-    for zid, (label, _, _) in WATER_STRESS_ZONES.items():
-        zone_labels[ds == zid] = label
-
-    colorscale = [
-        [0.00, WATER_STRESS_ZONES[0][1]],
-        [0.33, WATER_STRESS_ZONES[0][1]],
-        [0.33, WATER_STRESS_ZONES[1][1]],
-        [0.66, WATER_STRESS_ZONES[1][1]],
-        [0.66, WATER_STRESS_ZONES[2][1]],
-        [0.99, WATER_STRESS_ZONES[2][1]],
-        [0.99, WATER_STRESS_ZONES[3][1]],
-        [1.00, WATER_STRESS_ZONES[3][1]],
+    zlabels = np.full(ds.shape, "NoData", dtype=object)
+    for zid, (label, _) in WATER_STRESS_ZONES.items():
+        zlabels[ds == zid] = label
+    cscale = [
+        [0.00, WATER_STRESS_ZONES[0][1]], [0.33, WATER_STRESS_ZONES[0][1]],
+        [0.33, WATER_STRESS_ZONES[1][1]], [0.66, WATER_STRESS_ZONES[1][1]],
+        [0.66, WATER_STRESS_ZONES[2][1]], [0.99, WATER_STRESS_ZONES[2][1]],
+        [0.99, WATER_STRESS_ZONES[3][1]], [1.00, WATER_STRESS_ZONES[3][1]],
     ]
-
-    custom = np.stack([zone_labels, ds_ndvi, ds_ndwi], axis=-1)
-
+    custom = np.stack([zlabels, ds_ndvi, ds_ndwi], axis=-1)
     fig = go.Figure(go.Heatmap(
-        z=ds,
-        colorscale=colorscale,
-        zmin=0, zmax=3,
-        customdata=custom,
-        hovertemplate=(
-            "<b>%{customdata[0]}</b><br>"
-            "NDVI: %{customdata[1]:.4f}<br>"
-            "NDWI: %{customdata[2]:.4f}<br>"
-            "Pixel: (%{x}, %{y})<extra></extra>"
-        ),
-        colorbar=dict(
-            title=dict(text="Zone", side="right"),
-            thickness=14,
-            tickvals=[0, 1, 2, 3],
-            ticktext=[WATER_STRESS_ZONES[i][0] for i in range(4)],
-            len=0.9,
-        ),
-        showscale=True,
+        z=ds, colorscale=cscale, zmin=0, zmax=3, customdata=custom,
+        hovertemplate="<b>%{customdata[0]}</b><br>NDVI: %{customdata[1]:.4f}<br>NDWI: %{customdata[2]:.4f}<br>Pixel: (%{x}, %{y})<extra></extra>",
+        colorbar=dict(title=dict(text="Zone", side="right"), thickness=14,
+                      tickvals=[0,1,2,3], ticktext=[WATER_STRESS_ZONES[i][0] for i in range(4)], len=0.9),
     ))
     fig.update_layout(**_base_layout())
     return fig
 
-# ── (B) NDVI + SAVI — Soil Interference Detection ────────────────────────────
-# Where |NDVI - SAVI| is large, NDVI is being inflated/deflated by soil
-# background — those pixels are unreliable for vegetation assessment.
-
 @st.cache_data(show_spinner=False)
-def compute_soil_interference(ndvi_array, savi_array):
-    """
-    Returns absolute difference array. High values = soil interference.
-    Threshold at 75th percentile of valid differences to flag unreliable pixels.
-    """
-    diff = np.abs(ndvi_array - savi_array)
-    valid_diff = diff[np.isfinite(diff)]
-    threshold = np.nanpercentile(valid_diff, 75) if len(valid_diff) > 0 else 0.1
-    unreliable_mask = (diff >= threshold) & np.isfinite(diff)
-    return diff, unreliable_mask, float(threshold)
-
-@st.cache_data(show_spinner=False)
-def make_soil_interference_fig(ndvi_array, diff_array, unreliable_mask, threshold):
+def make_soil_interference_fig(ndvi_array, diff_array, unreliable_mask):
     ds_ndvi       = downsample(ndvi_array)
     ds_diff       = downsample(diff_array)
     ds_unreliable = downsample(unreliable_mask.astype(np.float32))
-
-    # Base: NDVI map
-    ndvi_colors = ["#1a6fa8","#c8a45e","#f5c518","#8bc34a","#4caf50","#2e7d32","#1b5e20"]
-    ndvi_colorscale = [[i / (len(ndvi_colors) - 1), c] for i, c in enumerate(ndvi_colors)]
-
-    # Reliability label per pixel
+    cols = ["#1a6fa8","#c8a45e","#f5c518","#8bc34a","#4caf50","#2e7d32","#1b5e20"]
+    cscale = [[i/(len(cols)-1), c] for i, c in enumerate(cols)]
     reliability = np.where(ds_unreliable > 0.5, "Unreliable (soil interference)", "Reliable")
     custom = np.stack([reliability, ds_diff], axis=-1)
-
     fig = go.Figure()
-
-    # Layer 1 — NDVI base heatmap
     fig.add_trace(go.Heatmap(
-        z=ds_ndvi,
-        colorscale=ndvi_colorscale,
-        zmin=-1, zmax=1,
-        customdata=custom,
-        hovertemplate=(
-            "<b>NDVI: %{z:.4f}</b><br>"
-            "Reliability: %{customdata[0]}<br>"
-            "|NDVI−SAVI|: %{customdata[1]:.4f}<br>"
-            "Pixel: (%{x}, %{y})<extra></extra>"
-        ),
-        colorbar=dict(
-            title=dict(text="NDVI", side="right"),
-            thickness=14, len=0.9, x=1.02,
-        ),
-        showscale=True,
-        name="NDVI",
+        z=ds_ndvi, colorscale=cscale, zmin=-1, zmax=1, customdata=custom,
+        hovertemplate="<b>NDVI: %{z:.4f}</b><br>Reliability: %{customdata[0]}<br>|NDVI−SAVI|: %{customdata[1]:.4f}<br>Pixel: (%{x}, %{y})<extra></extra>",
+        colorbar=dict(title=dict(text="NDVI", side="right"), thickness=14, len=0.9, x=1.02),
     ))
-
-    # Layer 2 — red semi-transparent overlay where unreliable
-    # Build an RGBA overlay: red where unreliable, fully transparent elsewhere
-    h, w = ds_unreliable.shape
-    overlay = np.zeros((h, w, 4), dtype=np.uint8)
-    mask = ds_unreliable > 0.5
-    overlay[mask]  = [220, 53, 69, 140]    # red with ~55% opacity
-    overlay[~mask] = [0,   0,  0,   0]     # fully transparent
-
-    import base64, PIL.Image
-    pil_img = PIL.Image.fromarray(overlay, mode="RGBA")
-    buf = io.BytesIO()
-    pil_img.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode()
-    img_src = f"data:image/png;base64,{b64}"
-
-    fig.add_layout_image(dict(
-        source=img_src,
-        xref="x", yref="y",
-        x=0, y=0,
-        sizex=w, sizey=h,
-        sizing="stretch",
-        opacity=1.0,
-        layer="above",
-    ))
-
+    try:
+        import base64
+        from PIL import Image as PILImage
+        h, w   = ds_unreliable.shape
+        overlay = np.zeros((h, w, 4), dtype=np.uint8)
+        mask    = ds_unreliable > 0.5
+        overlay[mask]  = [220, 53, 69, 140]
+        overlay[~mask] = [0,   0,  0,   0]
+        pil_img = PILImage.fromarray(overlay, mode="RGBA")
+        buf     = io.BytesIO()
+        pil_img.save(buf, format="PNG")
+        b64     = base64.b64encode(buf.getvalue()).decode()
+        fig.add_layout_image(dict(
+            source=f"data:image/png;base64,{b64}",
+            xref="x", yref="y", x=0, y=0,
+            sizex=w, sizey=h, sizing="stretch", opacity=1.0, layer="above",
+        ))
+        fig.update_xaxes(range=[0, w])
+        fig.update_yaxes(range=[h, 0])
+    except ImportError:
+        pass
     fig.update_layout(**_base_layout())
-    fig.update_xaxes(range=[0, w])
-    fig.update_yaxes(range=[h, 0])
     return fig
-
-# ── (C) NDVI + VARI — Hidden Stress Detection ────────────────────────────────
-# Anomaly: high VARI (looks green visually) but low NDVI (poor NIR response)
-# This reveals vegetation that appears healthy to the eye but is physiologically stressed.
-
-@st.cache_data(show_spinner=False)
-def compute_hidden_stress(ndvi_array, vari_array,
-                           vari_thresh=0.1, ndvi_thresh=0.3):
-    """
-    Returns a zone map:
-      0 = Normal / no anomaly
-      1 = Hidden stress  (high VARI + low NDVI)
-      2 = Confirmed healthy (high VARI + high NDVI)
-    NaN where either input is NaN.
-    """
-    valid = np.isfinite(ndvi_array) & np.isfinite(vari_array)
-    zones = np.full(ndvi_array.shape, -1, dtype=np.int8)
-
-    hi_vari = vari_array >= vari_thresh
-    hi_ndvi = ndvi_array >= ndvi_thresh
-
-    zones[valid & ~hi_vari & ~hi_ndvi] = 0   # normal background
-    zones[valid &  hi_vari & ~hi_ndvi] = 1   # hidden stress ← anomaly
-    zones[valid &  hi_vari &  hi_ndvi] = 2   # confirmed healthy
-    zones[valid & ~hi_vari &  hi_ndvi] = 0   # strong NIR, low visible green — normal
-    return zones
-
-HIDDEN_STRESS_ZONES = {
-    0: ("No anomaly",         "#B2BABB"),
-    1: ("Hidden stress",      "#E74C3C"),   # the key anomaly zone — red
-    2: ("Confirmed healthy",  "#27AE60"),
-}
 
 @st.cache_data(show_spinner=False)
 def make_hidden_stress_fig(zone_array, ndvi_ds, vari_ds):
     ds      = downsample(zone_array.astype(float))
+    ds[ds == -1] = np.nan
     ds_ndvi = downsample(ndvi_ds)
     ds_vari = downsample(vari_ds)
-    ds[ds == -1] = np.nan
-
-    zone_labels = np.full(ds.shape, "NoData", dtype=object)
+    zlabels = np.full(ds.shape, "NoData", dtype=object)
     for zid, (label, _) in HIDDEN_STRESS_ZONES.items():
-        zone_labels[ds == zid] = label
-
-    colorscale = [
-        [0.00, HIDDEN_STRESS_ZONES[0][1]],
-        [0.33, HIDDEN_STRESS_ZONES[0][1]],
-        [0.33, HIDDEN_STRESS_ZONES[1][1]],
-        [0.66, HIDDEN_STRESS_ZONES[1][1]],
-        [0.66, HIDDEN_STRESS_ZONES[2][1]],
-        [1.00, HIDDEN_STRESS_ZONES[2][1]],
+        zlabels[ds == zid] = label
+    cscale = [
+        [0.00, HIDDEN_STRESS_ZONES[0][1]], [0.33, HIDDEN_STRESS_ZONES[0][1]],
+        [0.33, HIDDEN_STRESS_ZONES[1][1]], [0.66, HIDDEN_STRESS_ZONES[1][1]],
+        [0.66, HIDDEN_STRESS_ZONES[2][1]], [1.00, HIDDEN_STRESS_ZONES[2][1]],
     ]
-
-    custom = np.stack([zone_labels, ds_ndvi, ds_vari], axis=-1)
-
+    custom = np.stack([zlabels, ds_ndvi, ds_vari], axis=-1)
     fig = go.Figure(go.Heatmap(
-        z=ds,
-        colorscale=colorscale,
-        zmin=0, zmax=2,
-        customdata=custom,
-        hovertemplate=(
-            "<b>%{customdata[0]}</b><br>"
-            "NDVI: %{customdata[1]:.4f}<br>"
-            "VARI: %{customdata[2]:.4f}<br>"
-            "Pixel: (%{x}, %{y})<extra></extra>"
-        ),
-        colorbar=dict(
-            title=dict(text="Zone", side="right"),
-            thickness=14,
-            tickvals=[0, 1, 2],
-            ticktext=[HIDDEN_STRESS_ZONES[i][0] for i in range(3)],
-            len=0.9,
-        ),
-        showscale=True,
+        z=ds, colorscale=cscale, zmin=0, zmax=2, customdata=custom,
+        hovertemplate="<b>%{customdata[0]}</b><br>NDVI: %{customdata[1]:.4f}<br>VARI: %{customdata[2]:.4f}<br>Pixel: (%{x}, %{y})<extra></extra>",
+        colorbar=dict(title=dict(text="Zone", side="right"), thickness=14,
+                      tickvals=[0,1,2], ticktext=[HIDDEN_STRESS_ZONES[i][0] for i in range(3)], len=0.9),
     ))
     fig.update_layout(**_base_layout())
     return fig
 
-# ── Fusion zone stats helper ──────────────────────────────────────────────────
-def zone_stats_html(zone_array, zone_dict, nodata_val=-1):
-    """Returns HTML summary cards for each zone — pixel count + percentage."""
-    total = np.sum(zone_array != nodata_val)
-    cards = ""
-    for zid, info in zone_dict.items():
-        color = info[1]
-        label = info[0]
-        count = int(np.sum(zone_array == zid))
-        pct   = count / total * 100 if total > 0 else 0
-        cards += (
-            f'<div style="flex:1;min-width:130px;background:{color}22;border:0.5px solid {color};'
-            f'border-radius:8px;padding:10px;text-align:center;">'
-            f'<div style="font-size:17px;font-weight:600;color:{color};">{pct:.1f}%</div>'
-            f'<div style="font-size:12px;color:#444;margin-top:2px;">{label}</div>'
-            f'<div style="font-size:10px;color:#888;">{count:,} px</div>'
-            f'</div>'
-        )
-    return f'<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;">{cards}</div>'
+# ── FUSION COMPUTATIONS ───────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def compute_water_stress_zones(ndvi_array, ndwi_array, ndvi_thresh=0.3, ndwi_thresh=0.0):
+    valid   = np.isfinite(ndvi_array) & np.isfinite(ndwi_array)
+    zones   = np.full(ndvi_array.shape, -1, dtype=np.int8)
+    hi_ndvi = ndvi_array >= ndvi_thresh
+    hi_ndwi = ndwi_array >= ndwi_thresh
+    zones[valid & ~hi_ndvi & ~hi_ndwi] = 0
+    zones[valid & ~hi_ndvi &  hi_ndwi] = 1
+    zones[valid &  hi_ndvi & ~hi_ndwi] = 2
+    zones[valid &  hi_ndvi &  hi_ndwi] = 3
+    return zones
+
+@st.cache_data(show_spinner=False)
+def compute_soil_interference(ndvi_array, savi_array, percentile=75):
+    diff       = np.abs(ndvi_array - savi_array)
+    valid_diff = diff[np.isfinite(diff)]
+    threshold  = float(np.nanpercentile(valid_diff, percentile)) if len(valid_diff) > 0 else 0.1
+    unreliable = (diff >= threshold) & np.isfinite(diff)
+    return diff, unreliable, threshold
+
+@st.cache_data(show_spinner=False)
+def compute_hidden_stress(ndvi_array, vari_array, vari_thresh=0.1, ndvi_thresh=0.3):
+    valid   = np.isfinite(ndvi_array) & np.isfinite(vari_array)
+    zones   = np.full(ndvi_array.shape, -1, dtype=np.int8)
+    hi_vari = vari_array >= vari_thresh
+    hi_ndvi = ndvi_array >= ndvi_thresh
+    zones[valid & ~hi_vari & ~hi_ndvi] = 0
+    zones[valid &  hi_vari & ~hi_ndvi] = 1
+    zones[valid &  hi_vari &  hi_ndvi] = 2
+    zones[valid & ~hi_vari &  hi_ndvi] = 0
+    return zones
 
 # ── EXPORT ────────────────────────────────────────────────────────────────────
 def array_to_geotiff_bytes(array, profile):
     profile = profile.copy()
     profile.update(dtype=rasterio.float32, count=1, nodata=-9999, compress="lzw", driver="GTiff")
-    for key in ["blockxsize", "blockysize", "tiled"]:
+    for key in ["blockxsize","blockysize","tiled"]:
         profile.pop(key, None)
     buf = io.BytesIO()
     with rasterio.open(buf, "w", **profile) as dst:
-        out = np.where(np.isfinite(array), array, -9999).astype(np.float32)
-        dst.write(out, 1)
+        dst.write(np.where(np.isfinite(array), array, -9999).astype(np.float32), 1)
     buf.seek(0)
     return buf.read()
 
 def cluster_to_geotiff_bytes(array, profile):
     profile = profile.copy()
     profile.update(dtype=rasterio.int32, count=1, nodata=-9999, compress="lzw", driver="GTiff")
-    for key in ["blockxsize", "blockysize", "tiled"]:
+    for key in ["blockxsize","blockysize","tiled"]:
         profile.pop(key, None)
     buf = io.BytesIO()
     with rasterio.open(buf, "w", **profile) as dst:
@@ -521,435 +411,390 @@ def cluster_to_geotiff_bytes(array, profile):
     buf.seek(0)
     return buf.read()
 
-# ── SESSION STATE ─────────────────────────────────────────────────────────────
-for key in ["index_array", "cluster_array", "profile", "bands_used", "index_name",
-            "all_bands"]:
-    if key not in st.session_state:
-        st.session_state[key] = None
-
-# ── SIDEBAR ───────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  SIDEBAR
+# ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## Vegetation Analyser")
     st.markdown("---")
     st.markdown('<div class="section-title">Upload mode</div>', unsafe_allow_html=True)
     upload_mode = st.radio(
-        "Upload mode",
-        ["Multispectral (single file)", "Single bands (individual files)", "RGB combined (VARI only)"],
+        "mode", ["Individual bands", "RGB image (VARI only)"],
         label_visibility="collapsed"
     )
     st.markdown("---")
-    st.markdown('<div class="section-title">Vegetation index</div>', unsafe_allow_html=True)
-    selected_index = st.radio("Index", ["NDVI", "VARI", "NDWI", "SAVI"], label_visibility="collapsed")
-    st.caption(f"Formula: `{INDEX_FORMULAS[selected_index]}`")
-    st.markdown("---")
     st.markdown('<div class="section-title">K-Means clusters</div>', unsafe_allow_html=True)
-    k_val = st.slider("Number of clusters (K)", min_value=2, max_value=8, value=3, step=1)
-    st.markdown("---")
-    run_btn = st.button("Run analysis", type="primary", use_container_width=True)
+    k_val = st.slider("K", min_value=2, max_value=8, value=3, step=1,
+                      label_visibility="collapsed")
+    st.caption(f"K = {k_val} clusters")
 
-# ── MAIN CONTENT ──────────────────────────────────────────────────────────────
-st.markdown("### Upload your imagery")
+# ─────────────────────────────────────────────────────────────────────────────
+#  STEP 1 — UPLOAD
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("## Step 1 — Upload imagery")
 
-bands = {}
-profile_ref = None
-error_msg = None
+bands_loaded = {}
+profile_ref  = None
 
-if upload_mode == "RGB combined (VARI only)" and selected_index != "VARI":
-    st.error(
-        f"**RGB images cannot calculate {selected_index}.** "
-        f"Switch the index to **VARI**, or upload a multispectral file for {selected_index}."
-    )
-
-elif upload_mode == "Multispectral (single file)":
-    ms_file = st.file_uploader("Upload multispectral GeoTIFF", type=["tif", "tiff"], key="ms_file")
-    if ms_file:
-        _, ref_profile, meta = read_band_from_file(ms_file, 1)
-        profile_ref = ref_profile
-        st.info(f"File loaded — {meta['count']} band(s) | {meta['width']}×{meta['height']} px | CRS: {meta['crs']}")
-        needed_bands = INDEX_BANDS[selected_index]
-        col_list = st.columns(len(needed_bands))
-        band_options = [f"Band {i+1}" for i in range(meta["count"])]
-        for i, bname in enumerate(needed_bands):
-            with col_list[i]:
-                choice = st.selectbox(
-                    f"Which band is **{bname.upper()}**?",
-                    options=band_options,
-                    index=min(i, meta["count"] - 1),
-                    key=f"band_sel_{bname}"
-                )
-                band_num = int(choice.split(" ")[1])
-                arr, _, _ = read_band_from_file(ms_file, band_num)
-                bands[bname] = arr
-
-elif upload_mode == "Single bands (individual files)":
-    needed_bands = INDEX_BANDS[selected_index]
-    cols = st.columns(len(needed_bands))
-    for i, bname in enumerate(needed_bands):
-        with cols[i]:
-            f = st.file_uploader(f"{bname.upper()} band (.tif)", type=["tif", "tiff"], key=f"single_{bname}")
+if upload_mode == "Individual bands":
+    st.caption("Upload any subset of bands. Only indices computable from your uploads will be shown.")
+    uc = st.columns(4)
+    band_specs = [
+        ("red",   "Red band",   "#E74C3C"),
+        ("green", "Green band", "#27AE60"),
+        ("blue",  "Blue band",  "#2980B9"),
+        ("nir",   "NIR band",   "#8E44AD"),
+    ]
+    for i, (bname, blabel, bcolor) in enumerate(band_specs):
+        with uc[i]:
+            st.markdown(
+                f'<div style="font-size:11px;font-weight:600;color:{bcolor};">{blabel}</div>',
+                unsafe_allow_html=True
+            )
+            f = st.file_uploader(blabel, type=["tif","tiff"], key=f"ub_{bname}",
+                                 label_visibility="collapsed")
             if f:
                 arr, prof, meta = read_band_from_file(f, 1)
-                bands[bname] = arr
+                bands_loaded[bname] = arr
                 if profile_ref is None:
                     profile_ref = prof
                 st.caption(f"{meta['width']}×{meta['height']} px")
-    if len(bands) == len(needed_bands):
-        shapes = [v.shape for v in bands.values()]
-        if len(set(shapes)) > 1:
-            error_msg = "All band files must have the same dimensions. Shapes: " + str(shapes)
 
-elif upload_mode == "RGB combined (VARI only)":
-    rgb_file = st.file_uploader("Upload RGB image", type=["tif", "tiff", "jpg", "jpeg", "png"], key="rgb_file")
-    if rgb_file:
-        r_arr, prof, meta = read_band_from_file(rgb_file, 1)
-        g_arr, _, _       = read_band_from_file(rgb_file, 2)
-        b_arr, _, _       = read_band_from_file(rgb_file, 3)
-        bands = {"red": r_arr, "green": g_arr, "blue": b_arr}
-        profile_ref = prof
+    # shape check
+    shapes = list({v.shape for v in bands_loaded.values()})
+    if len(shapes) > 1:
+        st.error(f"Band dimensions don't match: {shapes}. All bands must be the same size.")
+        bands_loaded = {}
+
+elif upload_mode == "RGB image (VARI only)":
+    st.caption("RGB combined image — only VARI can be computed (no NIR channel).")
+    rgb_f = st.file_uploader("Upload RGB image", type=["tif","tiff","jpg","jpeg","png"],
+                              key="ub_rgb")
+    if rgb_f:
+        r_arr, prof, meta = read_band_from_file(rgb_f, 1)
+        g_arr, _, _       = read_band_from_file(rgb_f, 2)
+        b_arr, _, _       = read_band_from_file(rgb_f, 3)
+        bands_loaded = {"red": r_arr, "green": g_arr, "blue": b_arr}
+        profile_ref  = prof
         st.info(f"RGB loaded — {meta['width']}×{meta['height']} px | R=1, G=2, B=3")
 
-if error_msg:
-    st.error(error_msg)
+# Persist bands to session_state whenever new uploads arrive
+if bands_loaded:
+    st.session_state.bands       = bands_loaded
+    st.session_state.profile_ref = profile_ref
+    # Clear computed indices and clusters when new bands are uploaded
+    st.session_state.computed_indices = {}
+    st.session_state.cluster_results  = {}
 
-needed = INDEX_BANDS[selected_index]
-missing = [b for b in needed if b not in bands]
+bands       = st.session_state.bands
+profile_ref = st.session_state.get("profile_ref")
 
-if bands and missing:
-    st.error(
-        f"**{selected_index} needs: {', '.join(b.upper() for b in needed)}** — "
-        f"Missing: {', '.join(b.upper() for b in missing)}."
+# ─────────────────────────────────────────────────────────────────────────────
+#  STEP 2 — SELECT & COMPUTE INDICES
+# ─────────────────────────────────────────────────────────────────────────────
+if not bands:
+    st.info("Upload at least one band to continue.")
+    st.stop()
+
+st.markdown("---")
+st.markdown("## Step 2 — Select indices to compute")
+
+avail = available_indices(bands)
+
+# Show availability chips
+chip_html = ""
+for idx_name, can_compute in avail.items():
+    needed = INDEX_BANDS[idx_name]
+    missing = [b for b in needed if b not in bands]
+    if can_compute:
+        chip_html += f'<span class="chip-available">✔ {idx_name}</span>'
+    else:
+        chip_html += f'<span class="chip-unavailable">✖ {idx_name} (needs {", ".join(missing)})</span>'
+st.markdown(chip_html, unsafe_allow_html=True)
+st.markdown("")
+
+computable = [name for name, ok in avail.items() if ok]
+
+if not computable:
+    st.warning("No indices can be computed from the uploaded bands. Upload more bands.")
+    st.stop()
+
+selected_indices = st.multiselect(
+    "Select indices to compute",
+    options=computable,
+    default=[computable[0]],
+    format_func=lambda x: f"{x} — {INDEX_DESC[x]}",
+)
+
+for idx in selected_indices:
+    st.caption(f"`{idx}`: {INDEX_FORMULAS[idx]}")
+
+if not selected_indices:
+    st.warning("Select at least one index.")
+    st.stop()
+
+if st.button("Compute selected indices", type="primary"):
+    prog = st.progress(0, text="Starting...")
+    total = len(selected_indices)
+    for i, idx_name in enumerate(selected_indices):
+        prog.progress(
+            int((i / total) * 80),
+            text=f"Computing {idx_name} ({i+1}/{total})..."
+        )
+        compute_and_store(idx_name)
+
+    prog.progress(85, text=f"Running K-Means (K={k_val})...")
+    for idx_name in selected_indices:
+        arr = st.session_state.computed_indices[idx_name]
+        st.session_state.cluster_results[idx_name] = _run_kmeans_cached(arr, k_val)
+
+    prog.progress(100, text="Done!")
+    prog.empty()
+    st.rerun()
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  STEP 2 RESULTS — show all computed indices
+# ─────────────────────────────────────────────────────────────────────────────
+computed = st.session_state.computed_indices
+
+if computed:
+    st.markdown("---")
+    st.markdown("### Index results")
+
+    for idx_name, idx_arr in computed.items():
+        valid_vals = idx_arr[np.isfinite(idx_arr)]
+        with st.expander(f"{idx_name} — {INDEX_DESC[idx_name]}", expanded=True):
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric(f"Max",   f"{np.nanmax(valid_vals):.4f}")
+            m2.metric(f"Mean",  f"{np.nanmean(valid_vals):.4f}")
+            m3.metric(f"Min",   f"{np.nanmin(valid_vals):.4f}")
+            m4.metric("Valid px", f"{len(valid_vals):,}")
+
+            t1, t2 = st.tabs([f"{idx_name} Map", "Cluster Map"])
+            with t1:
+                st.plotly_chart(make_index_fig(idx_arr, idx_name), use_container_width=True)
+                if idx_name == "NDVI":
+                    st.markdown("##### Health scale")
+                    hcols = st.columns(len(HEALTH_THRESHOLDS))
+                    for hi, (lo, h, label, bg, tc) in enumerate(HEALTH_THRESHOLDS):
+                        with hcols[hi]:
+                            st.markdown(
+                                f'<div style="background:{bg};color:{tc};padding:5px 6px;border-radius:6px;'
+                                f'font-size:10px;text-align:center;font-weight:600;">{label}<br>'
+                                f'<span style="font-weight:400;">{lo} to {h}</span></div>',
+                                unsafe_allow_html=True
+                            )
+            with t2:
+                cl_arr = st.session_state.cluster_results.get(idx_name)
+                if cl_arr is not None:
+                    st.plotly_chart(make_cluster_fig(cl_arr, k_val), use_container_width=True)
+                    st.markdown("##### Cluster distribution")
+                    dcols  = st.columns(k_val)
+                    colors = ["#1565c0","#2e7d32","#ef6c00","#6a1b9a","#c62828","#00695c","#f9a825","#4e342e"]
+                    total_v = int(np.sum(cl_arr != -9999))
+                    for ki in range(k_val):
+                        count = int(np.sum(cl_arr == ki))
+                        pct   = count / total_v * 100 if total_v > 0 else 0
+                        with dcols[ki]:
+                            st.markdown(
+                                f'<div style="background:{colors[ki]}22;border:0.5px solid {colors[ki]};'
+                                f'border-radius:6px;padding:8px;text-align:center;">'
+                                f'<div style="font-size:16px;font-weight:600;color:{colors[ki]};">{pct:.1f}%</div>'
+                                f'<div style="font-size:11px;color:#555;">Cluster {ki}</div>'
+                                f'<div style="font-size:10px;color:#888;">{count:,} px</div></div>',
+                                unsafe_allow_html=True
+                            )
+
+    # ── Export ────────────────────────────────────────────────────────────────
+    if profile_ref:
+        st.markdown("---")
+        st.markdown("### Export")
+        exp_cols = st.columns(len(computed) * 2)
+        col_i = 0
+        for idx_name, idx_arr in computed.items():
+            with exp_cols[col_i]:
+                st.download_button(
+                    f"Download {idx_name} GeoTIFF",
+                    data=array_to_geotiff_bytes(idx_arr, profile_ref),
+                    file_name=f"{idx_name.lower()}_output.tif",
+                    mime="image/tiff",
+                    use_container_width=True,
+                )
+            col_i += 1
+            cl_arr = st.session_state.cluster_results.get(idx_name)
+            if cl_arr is not None:
+                with exp_cols[col_i]:
+                    st.download_button(
+                        f"Download {idx_name} clusters",
+                        data=cluster_to_geotiff_bytes(cl_arr, profile_ref),
+                        file_name=f"{idx_name.lower()}_clusters.tif",
+                        mime="image/tiff",
+                        use_container_width=True,
+                    )
+            col_i += 1
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  STEP 3 — FUSION ANALYSIS
+# ─────────────────────────────────────────────────────────────────────────────
+if not computed:
+    st.stop()
+
+st.markdown("---")
+st.markdown("## Step 3 — Fusion analysis (optional)")
+st.caption("Combines two indices to detect conditions single indices cannot reveal.")
+
+# Evaluate which fusions are available, partially available, or unavailable
+fusion_status = {}
+for fname, (i1, i2) in FUSION_REQUIRES.items():
+    has_i1 = i1 in computed
+    has_i2 = i2 in computed
+    can_i1 = avail.get(i1, False)
+    can_i2 = avail.get(i2, False)
+    if has_i1 and has_i2:
+        fusion_status[fname] = "ready"
+    elif can_i1 and can_i2:
+        fusion_status[fname] = "computable"   # bands exist, just not computed yet
+    else:
+        missing_bands = []
+        for idx in [i1, i2]:
+            if not avail.get(idx, False):
+                missing_bands += [b for b in INDEX_BANDS[idx] if b not in bands]
+        fusion_status[fname] = ("missing_bands", list(set(missing_bands)))
+
+# Display fusion availability
+for fname, status in fusion_status.items():
+    i1, i2 = FUSION_REQUIRES[fname]
+    if status == "ready":
+        st.markdown(
+            f'<span class="chip-available">✔ {fname}</span>',
+            unsafe_allow_html=True
+        )
+    elif status == "computable":
+        missing_computed = [x for x in [i1, i2] if x not in computed]
+        st.markdown(
+            f'<span class="chip-unavailable">⚠ {fname} — needs {", ".join(missing_computed)} to be computed</span>',
+            unsafe_allow_html=True
+        )
+    else:
+        _, mb = status
+        st.markdown(
+            f'<span class="chip-unavailable">✖ {fname} — missing bands: {", ".join(mb)}</span>',
+            unsafe_allow_html=True
+        )
+
+st.markdown("")
+
+# On-demand compute buttons for "computable" fusions
+for fname, status in fusion_status.items():
+    if status == "computable":
+        i1, i2 = FUSION_REQUIRES[fname]
+        missing_computed = [x for x in [i1, i2] if x not in computed]
+        for idx_needed in missing_computed:
+            if st.button(f"➕ Compute {idx_needed} (required for {fname})",
+                         key=f"ondemand_{fname}_{idx_needed}"):
+                with st.spinner(f"Computing {idx_needed}..."):
+                    compute_and_store(idx_needed)
+                    arr = st.session_state.computed_indices[idx_needed]
+                    st.session_state.cluster_results[idx_needed] = _run_kmeans_cached(arr, k_val)
+                st.success(f"{idx_needed} computed and stored.")
+                st.rerun()
+
+# Fusion mode selector — only ready fusions
+ready_fusions = [f for f, s in fusion_status.items() if s == "ready"]
+
+if not ready_fusions:
+    st.info(
+        "No fusion modes are ready yet. Either compute the required indices above, "
+        "or upload the missing bands."
+    )
+    st.stop()
+
+fusion_mode = st.radio(
+    "Select fusion mode",
+    ready_fusions,
+    label_visibility="collapsed",
+)
+
+st.markdown("")
+
+i1, i2 = FUSION_REQUIRES[fusion_mode]
+arr1    = st.session_state.computed_indices[i1]
+arr2    = st.session_state.computed_indices[i2]
+
+# ── (A) Water Stress ─────────────────────────────────────────────────────────
+if fusion_mode == "NDVI + NDWI — Water stress":
+    with st.expander("Adjust thresholds", expanded=False):
+        fc1, fc2 = st.columns(2)
+        with fc1:
+            ndvi_t = st.slider("NDVI threshold", 0.0, 0.6, 0.3, 0.05,
+                               help="Above = vegetation present")
+        with fc2:
+            ndwi_t = st.slider("NDWI threshold", -0.3, 0.3, 0.0, 0.05,
+                               help="Above = sufficient water")
+
+    zones = compute_water_stress_zones(arr1, arr2, ndvi_t, ndwi_t)
+    st.plotly_chart(make_water_stress_fig(zones, arr1, arr2), use_container_width=True)
+    st.markdown("##### Zone breakdown")
+    st.markdown(zone_stats_html(zones, WATER_STRESS_ZONES), unsafe_allow_html=True)
+    st.markdown("---")
+    st.markdown(
+        "**How to read:** Green = healthy + well watered · Yellow = water-stressed (hidden) · "
+        "Blue = waterlogged · Brown = bare/dry"
     )
 
-# ── RUN ANALYSIS ──────────────────────────────────────────────────────────────
-if run_btn:
-    if not bands or missing:
-        st.error("Please upload all required bands before running.")
-    elif not error_msg:
-        progress_bar = st.progress(0, text="Starting analysis...")
-        status = st.empty()
+# ── (B) Soil Interference ─────────────────────────────────────────────────────
+elif fusion_mode == "NDVI + SAVI — Soil interference":
+    with st.expander("Adjust threshold", expanded=False):
+        pct_thresh = st.slider("Flag top N% as unreliable", 50, 95, 75, 5)
 
-        progress_bar.progress(10, text="Step 1 / 4 — Checking band values...")
-        status.caption("Step 1 / 4 — Checking band values...")
-        if "red" in bands and "nir" in bands:
-            if np.nanmean(bands["red"]) > np.nanmean(bands["nir"]):
-                st.warning("Red band mean > NIR mean — bands may be swapped. Check assignments.")
+    diff_arr, unreliable, threshold = compute_soil_interference(arr1, arr2, pct_thresh)
+    st.plotly_chart(make_soil_interference_fig(arr1, diff_arr, unreliable),
+                    use_container_width=True)
 
-        progress_bar.progress(25, text=f"Step 2 / 4 — Computing {selected_index}...")
-        status.caption(f"Step 2 / 4 — Computing {selected_index}...")
-        idx_arr = compute_index(
-            selected_index,
-            r=bands.get("red"),
-            nir=bands.get("nir"),
-            g=bands.get("green"),
-            b=bands.get("blue"),
+    total_v = int(np.sum(np.isfinite(diff_arr)))
+    u_ct    = int(np.sum(unreliable))
+    r_ct    = total_v - u_ct
+    pct_u   = u_ct / total_v * 100 if total_v > 0 else 0
+    sc1, sc2, sc3 = st.columns(3)
+    sc1.metric("Reliable pixels",   f"{r_ct:,}")
+    sc2.metric("Unreliable pixels", f"{u_ct:,}")
+    sc3.metric("Unreliable %",       f"{pct_u:.1f}%")
+    st.markdown("---")
+    st.markdown(
+        "**How to read:** Red overlay = pixels where `|NDVI − SAVI|` exceeds threshold. "
+        "In those areas NDVI is inflated by soil — use SAVI values instead."
+    )
+
+# ── (C) Hidden Stress ─────────────────────────────────────────────────────────
+elif fusion_mode == "NDVI + VARI — Hidden stress":
+    with st.expander("Adjust thresholds", expanded=False):
+        hc1, hc2 = st.columns(2)
+        with hc1:
+            vari_t  = st.slider("VARI threshold (visible greenness)", 0.0, 0.4, 0.1, 0.05)
+        with hc2:
+            ndvi_th = st.slider("NDVI threshold (NIR response)", 0.1, 0.6, 0.3, 0.05)
+
+    hs_zones = compute_hidden_stress(arr1, arr2, vari_t, ndvi_th)
+    st.plotly_chart(make_hidden_stress_fig(hs_zones, arr1, arr2), use_container_width=True)
+    st.markdown("##### Zone breakdown")
+    st.markdown(zone_stats_html(hs_zones, HIDDEN_STRESS_ZONES), unsafe_allow_html=True)
+
+    hidden_ct  = int(np.sum(hs_zones == 1))
+    total_veg  = int(np.sum(hs_zones >= 1))
+    pct_hidden = hidden_ct / total_veg * 100 if total_veg > 0 else 0
+
+    if pct_hidden > 15:
+        st.error(
+            f"**{pct_hidden:.1f}% of vegetated pixels show hidden stress.** "
+            "Looks green visually but NIR response is poor — likely early physiological stress."
         )
-
-        progress_bar.progress(55, text=f"Step 3 / 4 — Running K-Means (K={k_val})...")
-        status.caption(f"Step 3 / 4 — Running K-Means (K={k_val})...")
-        cl_arr = run_kmeans(idx_arr, k_val)
-
-        progress_bar.progress(80, text="Step 4 / 4 — Preparing maps...")
-        status.caption("Step 4 / 4 — Preparing maps...")
-        st.session_state.index_array   = idx_arr
-        st.session_state.cluster_array = cl_arr
-        st.session_state.profile       = profile_ref
-        st.session_state.bands_used    = bands
-        st.session_state.index_name    = selected_index
-        st.session_state.all_bands     = bands   # kept for fusion analysis
-
-        progress_bar.progress(100, text="Done!")
-        status.empty()
-        progress_bar.empty()
-
-# ── OUTPUT ────────────────────────────────────────────────────────────────────
-if st.session_state.index_array is not None:
-    idx_arr    = st.session_state.index_array
-    cl_arr     = st.session_state.cluster_array
-    idx_name   = st.session_state.index_name
-    bands_used = st.session_state.bands_used
-
-    st.markdown("---")
-    st.markdown("### Results")
-
-    valid_vals = idx_arr[np.isfinite(idx_arr)]
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric(f"Max {idx_name}",  f"{np.nanmax(valid_vals):.4f}")
-    c2.metric(f"Mean {idx_name}", f"{np.nanmean(valid_vals):.4f}")
-    c3.metric(f"Min {idx_name}",  f"{np.nanmin(valid_vals):.4f}")
-    c4.metric("Valid pixels",     f"{len(valid_vals):,}")
-
-    st.markdown("---")
-    tab1, tab2 = st.tabs([f"{idx_name} Map", "Cluster Map"])
-
-    with tab1:
-        st.markdown(f"**Hover over the map** to see {idx_name} value and crop health at each pixel.")
-        st.plotly_chart(make_index_fig(idx_arr, idx_name), use_container_width=True)
-
-        st.markdown("##### Crop health scale")
-        cols = st.columns(len(HEALTH_THRESHOLDS))
-        for i, (lo, hi, label, bg, tc, desc) in enumerate(HEALTH_THRESHOLDS):
-            with cols[i]:
-                st.markdown(
-                    f'<div style="background:{bg};color:{tc};padding:6px 8px;border-radius:6px;'
-                    f'font-size:11px;text-align:center;font-weight:600;">'
-                    f'{label}<br><span style="font-weight:400;">{lo} to {hi}</span></div>',
-                    unsafe_allow_html=True
-                )
-
-    with tab2:
-        st.markdown(f"**Hover over the map** to see cluster number at each pixel.")
-        st.plotly_chart(make_cluster_fig(cl_arr, k_val), use_container_width=True)
-
-        st.markdown("##### Cluster distribution")
-        dist_cols = st.columns(k_val)
-        cluster_colors = ["#1565c0","#2e7d32","#ef6c00","#6a1b9a","#c62828","#00695c","#f9a825","#4e342e"]
-        total_valid = np.sum(cl_arr != -9999)
-        for ki in range(k_val):
-            count = np.sum(cl_arr == ki)
-            pct = count / total_valid * 100 if total_valid > 0 else 0
-            with dist_cols[ki]:
-                st.markdown(
-                    f'<div style="background:{cluster_colors[ki]}22;border:0.5px solid {cluster_colors[ki]};'
-                    f'border-radius:6px;padding:8px;text-align:center;">'
-                    f'<div style="font-size:18px;font-weight:600;color:{cluster_colors[ki]};">{pct:.1f}%</div>'
-                    f'<div style="font-size:11px;color:#555;">Cluster {ki}</div>'
-                    f'<div style="font-size:10px;color:#888;">{count:,} px</div></div>',
-                    unsafe_allow_html=True
-                )
-
-    st.markdown("---")
-    st.markdown("### Export")
-    dl1, dl2 = st.columns(2)
-    if st.session_state.profile:
-        idx_bytes = array_to_geotiff_bytes(idx_arr, st.session_state.profile)
-        cl_bytes  = cluster_to_geotiff_bytes(cl_arr, st.session_state.profile)
-        with dl1:
-            st.download_button(
-                label=f"Download {idx_name} GeoTIFF",
-                data=idx_bytes,
-                file_name=f"{idx_name.lower()}_output.tif",
-                mime="image/tiff",
-                use_container_width=True,
-            )
-        with dl2:
-            st.download_button(
-                label="Download Cluster GeoTIFF",
-                data=cl_bytes,
-                file_name="cluster_output.tif",
-                mime="image/tiff",
-                use_container_width=True,
-            )
+    elif pct_hidden > 5:
+        st.warning(f"**{pct_hidden:.1f}% hidden stress detected.** Monitor these zones closely.")
     else:
-        st.info("GeoTIFF export requires geospatial metadata (CRS + transform) in the input file.")
+        st.success(f"Hidden stress is low ({pct_hidden:.1f}%). VARI and NDVI are in agreement.")
 
-# ── FUSION ANALYSIS SECTION ───────────────────────────────────────────────────
-if st.session_state.index_array is not None:
-    stored_bands = st.session_state.all_bands or {}
-
-    # Determine which fusion modes are possible given available bands
-    has_nir   = "nir"   in stored_bands
-    has_green = "green" in stored_bands
-    has_red   = "red"   in stored_bands
-    has_blue  = "blue"  in stored_bands
-
-    can_water_stress = has_nir and has_green and has_red   # needs NDVI + NDWI
-    can_soil_interf  = has_nir and has_red                  # needs NDVI + SAVI
-    can_hidden_stress= has_nir and has_red and has_green and has_blue  # needs NDVI + VARI
-
-    if not any([can_water_stress, can_soil_interf, can_hidden_stress]):
-        st.info(
-            "Fusion analysis requires additional bands. "
-            "Upload NIR + Red + Green + Blue for all three fusion modes."
-        )
-    else:
-        st.markdown("---")
-        st.markdown("### Fusion analysis")
-        st.caption(
-            "Combines two indices to detect crop conditions that single indices cannot reveal. "
-            "Select a mode below."
-        )
-
-        # Build list of available fusion modes dynamically
-        available_modes = []
-        if can_water_stress:
-            available_modes.append("NDVI + NDWI — Water stress detection")
-        if can_soil_interf:
-            available_modes.append("NDVI + SAVI — Soil interference detection")
-        if can_hidden_stress:
-            available_modes.append("NDVI + VARI — Hidden stress detection")
-
-        fusion_mode = st.radio(
-            "Fusion mode",
-            available_modes,
-            horizontal=True,
-            label_visibility="collapsed",
-        )
-
-        # ── Shared threshold sliders ──────────────────────────────────────────
-        r   = stored_bands.get("red")
-        nir = stored_bands.get("nir")
-        g   = stored_bands.get("green")
-        b   = stored_bands.get("blue")
-
-        # ── (A) Water Stress ─────────────────────────────────────────────────
-        if fusion_mode == "NDVI + NDWI — Water stress detection":
-            with st.expander("Adjust thresholds", expanded=False):
-                tc1, tc2 = st.columns(2)
-                with tc1:
-                    ndvi_thresh = st.slider(
-                        "NDVI threshold (vegetation / no vegetation)",
-                        min_value=0.0, max_value=0.6, value=0.3, step=0.05,
-                        help="Pixels above this = vegetation present"
-                    )
-                with tc2:
-                    ndwi_thresh = st.slider(
-                        "NDWI threshold (water content)",
-                        min_value=-0.3, max_value=0.3, value=0.0, step=0.05,
-                        help="Pixels above this = sufficient water content"
-                    )
-
-            with st.spinner("Computing NDVI + NDWI fusion..."):
-                ndvi_arr = compute_index("NDVI", r=r, nir=nir)
-                ndwi_arr = compute_index("NDWI", r=r, nir=nir, g=g)
-                zones    = compute_water_stress_zones(ndvi_arr, ndwi_arr,
-                                                      ndvi_thresh, ndwi_thresh)
-
-            st.plotly_chart(
-                make_water_stress_fig(zones, ndvi_arr, ndwi_arr),
-                use_container_width=True
-            )
-
-            # Zone legend + stats
-            st.markdown("##### Zone breakdown")
-            st.markdown(
-                zone_stats_html(zones, WATER_STRESS_ZONES),
-                unsafe_allow_html=True
-            )
-
-            st.markdown("---")
-            st.markdown(
-                "**How to read this map:**  \n"
-                "- 🟢 **Healthy** — good vegetation density and water content  \n"
-                "- 🟡 **Water-stressed** — crop looks dense but is moisture-deficient (hidden stress)  \n"
-                "- 🔵 **Waterlogged** — excess water, possible flooding or poor drainage  \n"
-                "- 🟫 **Bare/Dry** — sparse or no vegetation and dry conditions"
-            )
-
-        # ── (B) Soil Interference ────────────────────────────────────────────
-        elif fusion_mode == "NDVI + SAVI — Soil interference detection":
-            with st.expander("Adjust threshold", expanded=False):
-                percentile_thresh = st.slider(
-                    "Flag top N% of pixels as unreliable",
-                    min_value=50, max_value=95, value=75, step=5,
-                    help="Higher = stricter, fewer pixels flagged"
-                )
-
-            with st.spinner("Computing NDVI + SAVI fusion..."):
-                ndvi_arr  = compute_index("NDVI", r=r, nir=nir)
-                savi_arr  = compute_index("SAVI", r=r, nir=nir)
-                diff_arr, unreliable_mask, threshold = compute_soil_interference(
-                    ndvi_arr, savi_arr
-                )
-                # recompute with user percentile
-                valid_diff = diff_arr[np.isfinite(diff_arr)]
-                threshold  = float(np.nanpercentile(valid_diff, percentile_thresh))
-                unreliable_mask = (diff_arr >= threshold) & np.isfinite(diff_arr)
-
-            try:
-                fig_soil = make_soil_interference_fig(
-                    ndvi_arr, diff_arr, unreliable_mask, threshold
-                )
-                st.plotly_chart(fig_soil, use_container_width=True)
-            except ImportError:
-                st.warning(
-                    "PIL (Pillow) is required for the red overlay. "
-                    "Run `pip install Pillow` and restart the app. "
-                    "Showing plain NDVI map instead."
-                )
-                st.plotly_chart(make_index_fig(ndvi_arr, "NDVI"), use_container_width=True)
-
-            # Stats
-            total_valid   = int(np.sum(np.isfinite(diff_arr)))
-            unreliable_ct = int(np.sum(unreliable_mask))
-            reliable_ct   = total_valid - unreliable_ct
-            pct_unrel     = unreliable_ct / total_valid * 100 if total_valid > 0 else 0
-
-            sc1, sc2, sc3 = st.columns(3)
-            sc1.metric("Reliable pixels",    f"{reliable_ct:,}")
-            sc2.metric("Unreliable pixels",  f"{unreliable_ct:,}")
-            sc3.metric("Unreliable %",        f"{pct_unrel:.1f}%")
-
-            st.markdown("---")
-            st.markdown(
-                "**How to read this map:**  \n"
-                "Red overlay marks pixels where `|NDVI − SAVI|` exceeds the threshold — "
-                "these are areas where partial soil exposure is inflating or deflating the NDVI reading. "
-                "Use SAVI values instead of NDVI for those regions."
-            )
-
-        # ── (C) Hidden Stress ────────────────────────────────────────────────
-        elif fusion_mode == "NDVI + VARI — Hidden stress detection":
-            with st.expander("Adjust thresholds", expanded=False):
-                hc1, hc2 = st.columns(2)
-                with hc1:
-                    vari_thresh = st.slider(
-                        "VARI threshold (visible greenness)",
-                        min_value=0.0, max_value=0.4, value=0.1, step=0.05,
-                        help="Pixels above this = visually green"
-                    )
-                with hc2:
-                    ndvi_thresh_h = st.slider(
-                        "NDVI threshold (NIR response)",
-                        min_value=0.1, max_value=0.6, value=0.3, step=0.05,
-                        help="Pixels below this = low NIR activity"
-                    )
-
-            with st.spinner("Computing NDVI + VARI fusion..."):
-                ndvi_arr  = compute_index("NDVI", r=r, nir=nir)
-                vari_arr  = compute_index("VARI", r=r, g=g, b=b)
-                hs_zones  = compute_hidden_stress(
-                    ndvi_arr, vari_arr, vari_thresh, ndvi_thresh_h
-                )
-
-            st.plotly_chart(
-                make_hidden_stress_fig(hs_zones, ndvi_arr, vari_arr),
-                use_container_width=True
-            )
-
-            # Zone stats
-            st.markdown("##### Zone breakdown")
-            st.markdown(
-                zone_stats_html(hs_zones, HIDDEN_STRESS_ZONES),
-                unsafe_allow_html=True
-            )
-
-            # Highlight hidden stress specifically
-            hidden_ct  = int(np.sum(hs_zones == 1))
-            total_veg  = int(np.sum(hs_zones >= 1))
-            pct_hidden = hidden_ct / total_veg * 100 if total_veg > 0 else 0
-
-            if pct_hidden > 15:
-                st.error(
-                    f"**{pct_hidden:.1f}% of vegetated pixels show hidden stress.** "
-                    "These areas look green to the eye but have poor NIR response — "
-                    "likely early-stage physiological stress not yet visible."
-                )
-            elif pct_hidden > 5:
-                st.warning(
-                    f"**{pct_hidden:.1f}% of vegetated pixels show hidden stress.** "
-                    "Monitor these zones closely."
-                )
-            else:
-                st.success(
-                    f"Hidden stress is low ({pct_hidden:.1f}% of vegetated pixels). "
-                    "VARI and NDVI are largely in agreement."
-                )
-
-            st.markdown("---")
-            st.markdown(
-                "**How to read this map:**  \n"
-                "- 🔴 **Hidden stress** — vegetation looks green (high VARI) "
-                "but NIR response is poor (low NDVI). Physiological stress not yet visible to the eye.  \n"
-                "- 🟢 **Confirmed healthy** — both visible greenness and NIR response are strong  \n"
-                "- ⬜ **No anomaly** — background, soil, or water areas"
-            )
+    st.markdown("---")
+    st.markdown(
+        "**How to read:** Red = hidden stress (high VARI, low NDVI) · "
+        "Green = confirmed healthy · Grey = no anomaly / background"
+    )
