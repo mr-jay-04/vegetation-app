@@ -114,7 +114,7 @@ def run_kmeans(index_array, k):
     result[mask] = labels
     return result.reshape(index_array.shape)
 
-MAX_DISPLAY_PX = 800
+MAX_DISPLAY_PX = 500
 
 def downsample(array, max_dim=MAX_DISPLAY_PX):
     h, w = array.shape
@@ -138,13 +138,9 @@ def build_hover_arrays(index_array, bands, cluster_array):
     idx_ds = downsample(index_array)
     cl_ds  = downsample(cluster_array)
     health_labels = vectorized_health_labels(idx_ds)
+    # Only send health label and cluster — skip raw band DNs to reduce payload
     custom = [health_labels, cl_ds.astype(str)]
-    band_names = []
-    for bn, arr in bands.items():
-        if arr is not None:
-            custom.append(downsample(arr))
-            band_names.append(bn.upper())
-    return idx_ds, np.stack(custom, axis=-1), band_names
+    return idx_ds, np.stack(custom, axis=-1), []
 
 def ndvi_health_colorscale():
     return [
@@ -164,11 +160,9 @@ def make_plotly_map(index_array, cluster_array, bands, index_name):
         for i, bn in enumerate(band_names)
     )
     hover_tmpl = (
-        f"<b>{index_name}: %{{z:.4f}}</b><br>"
-        "Health: %{customdata[0]}<br>"
-        "Cluster: %{customdata[1]}<br>"
-        + extra_tmpl +
-        "Pixel: (%{x}, %{y})<extra></extra>"
+    f"<b>{index_name}: %{{z:.4f}}</b><br>"
+    "Health: %{customdata[0]}<br>"
+    "Cluster: %{customdata[1]}<extra></extra>"
     )
     colorscale = ndvi_health_colorscale() if index_name == "NDVI" else "RdYlGn"
     zmin, zmax = (-1, 1) if index_name in ("NDVI", "NDWI") else (-0.5, 0.5)
