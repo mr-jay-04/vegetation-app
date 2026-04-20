@@ -56,7 +56,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
-# Maps each index to the bands it needs
 INDEX_BANDS = {
     "NDVI": ["red", "nir"],
     "NDWI": ["green", "nir"],
@@ -78,7 +77,6 @@ INDEX_DESC = {
     "VARI": "Visible greenness (RGB only)",
 }
 
-# Maps each fusion to the two indices it needs
 FUSION_REQUIRES = {
     "NDVI + NDWI — Water stress":       ("NDVI", "NDWI"),
     "NDVI + SAVI — Soil interference":  ("NDVI", "SAVI"),
@@ -110,19 +108,20 @@ HIDDEN_STRESS_ZONES = {
 
 # ── SESSION STATE INIT ────────────────────────────────────────────────────────
 _state_defaults = {
-    "bands":           {},       # {"red": np.array, "nir": np.array, ...}
-    "profile_ref":     None,
-    "computed_indices":{},       # {"NDVI": np.array, "NDWI": np.array, ...}
-    "cluster_results": {},       # {"NDVI": np.array, ...}
-    "upload_mode":     None,
+    "bands":            {},
+    "profile_ref":      None,
+    "computed_indices": {},
+    "cluster_results":  {},
+    "upload_mode":      None,
+    "band_fingerprint": None,   # tracks when bands actually change
 }
 for k, v in _state_defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 # ── CORE HELPERS ──────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner=False)
-def read_band_bytes(file_bytes, band_num=1):
+def read_band_bytes(file_bytes: bytes, band_num: int = 1):
+    """Read a single band from GeoTIFF bytes. No cache — bytes aren't safely hashable."""
     with MemoryFile(file_bytes) as memfile:
         with memfile.open() as src:
             data    = src.read(band_num).astype(np.float32)
@@ -134,15 +133,18 @@ def read_band_bytes(file_bytes, band_num=1):
             }
     return data, profile, meta
 
-def read_band_from_file(uploaded_file, band_num=1):
+
+def read_band_from_file(uploaded_file, band_num: int = 1):
     fb = uploaded_file.read()
     uploaded_file.seek(0)
     return read_band_bytes(fb, band_num)
+
 
 def safe_divide(num, den, eps=1e-10):
     den_s  = np.where(np.abs(den) < eps, eps, den)
     result = num / den_s
     return np.where(np.abs(den) < eps, np.nan, result)
+
 
 @st.cache_data(show_spinner=False)
 def _compute_index_cached(name, r=None, nir=None, g=None, b=None):
@@ -151,16 +153,20 @@ def _compute_index_cached(name, r=None, nir=None, g=None, b=None):
     if name == "SAVI": return safe_divide(nir - r,   nir + r + 0.5) * 1.5
     if name == "VARI": return safe_divide(g   - r,   g   + r - b)
 
+
 def compute_and_store(name: str):
     """Compute a single index from stored bands and save to session_state."""
-    bd = st.session_state.bands
+    bd  = st.session_state.bands
     arr = _compute_index_cached(
         name,
-        r=bd.get("red"), nir=bd.get("nir"),
-        g=bd.get("green"), b=bd.get("blue"),
+        r=bd.get("red"),
+        nir=bd.get("nir"),
+        g=bd.get("green"),
+        b=bd.get("blue"),
     )
     st.session_state.computed_indices[name] = arr
     return arr
+
 
 @st.cache_data(show_spinner=False)
 def _run_kmeans_cached(index_array, k, sample_size=50_000):
@@ -179,6 +185,7 @@ def _run_kmeans_cached(index_array, k, sample_size=50_000):
     result[mask] = labels
     return result.reshape(index_array.shape)
 
+
 MAX_DISPLAY_PX = 500
 
 def downsample(array, max_dim=MAX_DISPLAY_PX):
@@ -192,18 +199,20 @@ def downsample(array, max_dim=MAX_DISPLAY_PX):
     col_idx = np.linspace(0, w - 1, new_w, dtype=int)
     return array[np.ix_(row_idx, col_idx)]
 
+
 def vectorized_health_labels(arr):
     labels = np.full(arr.shape, "Very Healthy", dtype=object)
     for lo, hi, label, _, _ in HEALTH_THRESHOLDS:
         labels[(arr >= lo) & (arr < hi)] = label
     return labels
 
+
 def available_indices(bands: dict) -> dict:
-    """Returns {index_name: True/False} based on which bands are present."""
     return {
         name: all(b in bands for b in needed)
         for name, needed in INDEX_BANDS.items()
     }
+
 
 def zone_stats_html(zone_array, zone_dict, nodata_val=-1):
     total = int(np.sum(zone_array != nodata_val))
@@ -221,6 +230,7 @@ def zone_stats_html(zone_array, zone_dict, nodata_val=-1):
         )
     return f'<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;">{cards}</div>'
 
+
 # ── PLOTLY FIGURES ────────────────────────────────────────────────────────────
 def _base_layout(height=480):
     return dict(
@@ -233,16 +243,17 @@ def _base_layout(height=480):
         paper_bgcolor="rgba(0,0,0,0)",
     )
 
+
 @st.cache_data(show_spinner=False)
 def make_index_fig(index_array, index_name):
     ds     = downsample(index_array)
     health = vectorized_health_labels(ds)
     if index_name == "NDVI":
-        cols = ["#1a6fa8","#c8a45e","#f5c518","#8bc34a","#4caf50","#2e7d32","#1b5e20"]
+        cols   = ["#1a6fa8","#c8a45e","#f5c518","#8bc34a","#4caf50","#2e7d32","#1b5e20"]
         cscale = [[i / (len(cols)-1), c] for i, c in enumerate(cols)]
     else:
         cscale = "RdYlGn"
-    zmin, zmax = (-1,1) if index_name in ("NDVI","NDWI") else (-0.5, 0.5)
+    zmin, zmax = (-1, 1) if index_name in ("NDVI", "NDWI") else (-0.5, 0.5)
     fig = go.Figure(go.Heatmap(
         z=ds, colorscale=cscale, zmin=zmin, zmax=zmax,
         customdata=health,
@@ -252,12 +263,13 @@ def make_index_fig(index_array, index_name):
     fig.update_layout(**_base_layout())
     return fig
 
+
 @st.cache_data(show_spinner=False)
 def make_cluster_fig(cluster_array, k):
     ds = downsample(cluster_array).astype(float)
     ds[ds == -9999] = np.nan
     colors = ["#1565c0","#2e7d32","#ef6c00","#6a1b9a","#c62828","#00695c","#f9a825","#4e342e"]
-    cscale = [[i/(k-1) if k>1 else 0, colors[i % len(colors)]] for i in range(k)]
+    cscale = [[i/(k-1) if k > 1 else 0, colors[i % len(colors)]] for i in range(k)]
     fig = go.Figure(go.Heatmap(
         z=ds, colorscale=cscale, zmin=0, zmax=k-1,
         hovertemplate="<b>Cluster: %{z:.0f}</b><br>Pixel: (%{x}, %{y})<extra></extra>",
@@ -266,6 +278,7 @@ def make_cluster_fig(cluster_array, k):
     ))
     fig.update_layout(**_base_layout())
     return fig
+
 
 @st.cache_data(show_spinner=False)
 def make_water_stress_fig(zone_array, ndvi_ds, ndwi_ds):
@@ -292,12 +305,13 @@ def make_water_stress_fig(zone_array, ndvi_ds, ndwi_ds):
     fig.update_layout(**_base_layout())
     return fig
 
+
 @st.cache_data(show_spinner=False)
 def make_soil_interference_fig(ndvi_array, diff_array, unreliable_mask):
     ds_ndvi       = downsample(ndvi_array)
     ds_diff       = downsample(diff_array)
     ds_unreliable = downsample(unreliable_mask.astype(np.float32))
-    cols = ["#1a6fa8","#c8a45e","#f5c518","#8bc34a","#4caf50","#2e7d32","#1b5e20"]
+    cols   = ["#1a6fa8","#c8a45e","#f5c518","#8bc34a","#4caf50","#2e7d32","#1b5e20"]
     cscale = [[i/(len(cols)-1), c] for i, c in enumerate(cols)]
     reliability = np.where(ds_unreliable > 0.5, "Unreliable (soil interference)", "Reliable")
     custom = np.stack([reliability, ds_diff], axis=-1)
@@ -310,7 +324,7 @@ def make_soil_interference_fig(ndvi_array, diff_array, unreliable_mask):
     try:
         import base64
         from PIL import Image as PILImage
-        h, w   = ds_unreliable.shape
+        h, w    = ds_unreliable.shape
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
         mask    = ds_unreliable > 0.5
         overlay[mask]  = [220, 53, 69, 140]
@@ -330,6 +344,7 @@ def make_soil_interference_fig(ndvi_array, diff_array, unreliable_mask):
         pass
     fig.update_layout(**_base_layout())
     return fig
+
 
 @st.cache_data(show_spinner=False)
 def make_hidden_stress_fig(zone_array, ndvi_ds, vari_ds):
@@ -355,6 +370,7 @@ def make_hidden_stress_fig(zone_array, ndvi_ds, vari_ds):
     fig.update_layout(**_base_layout())
     return fig
 
+
 # ── FUSION COMPUTATIONS ───────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def compute_water_stress_zones(ndvi_array, ndwi_array, ndvi_thresh=0.3, ndwi_thresh=0.0):
@@ -368,6 +384,7 @@ def compute_water_stress_zones(ndvi_array, ndwi_array, ndvi_thresh=0.3, ndwi_thr
     zones[valid &  hi_ndvi &  hi_ndwi] = 3
     return zones
 
+
 @st.cache_data(show_spinner=False)
 def compute_soil_interference(ndvi_array, savi_array, percentile=75):
     diff       = np.abs(ndvi_array - savi_array)
@@ -375,6 +392,7 @@ def compute_soil_interference(ndvi_array, savi_array, percentile=75):
     threshold  = float(np.nanpercentile(valid_diff, percentile)) if len(valid_diff) > 0 else 0.1
     unreliable = (diff >= threshold) & np.isfinite(diff)
     return diff, unreliable, threshold
+
 
 @st.cache_data(show_spinner=False)
 def compute_hidden_stress(ndvi_array, vari_array, vari_thresh=0.1, ndvi_thresh=0.3):
@@ -388,11 +406,13 @@ def compute_hidden_stress(ndvi_array, vari_array, vari_thresh=0.1, ndvi_thresh=0
     zones[valid & ~hi_vari &  hi_ndvi] = 0
     return zones
 
+
 # ── EXPORT ────────────────────────────────────────────────────────────────────
 def array_to_geotiff_bytes(array, profile):
     profile = profile.copy()
-    profile.update(dtype=rasterio.float32, count=1, nodata=-9999, compress="lzw", driver="GTiff")
-    for key in ["blockxsize","blockysize","tiled"]:
+    profile.update(dtype=rasterio.float32, count=1, nodata=-9999,
+                   compress="lzw", driver="GTiff")
+    for key in ["blockxsize", "blockysize", "tiled"]:
         profile.pop(key, None)
     buf = io.BytesIO()
     with rasterio.open(buf, "w", **profile) as dst:
@@ -400,16 +420,19 @@ def array_to_geotiff_bytes(array, profile):
     buf.seek(0)
     return buf.read()
 
+
 def cluster_to_geotiff_bytes(array, profile):
     profile = profile.copy()
-    profile.update(dtype=rasterio.int32, count=1, nodata=-9999, compress="lzw", driver="GTiff")
-    for key in ["blockxsize","blockysize","tiled"]:
+    profile.update(dtype=rasterio.int32, count=1, nodata=-9999,
+                   compress="lzw", driver="GTiff")
+    for key in ["blockxsize", "blockysize", "tiled"]:
         profile.pop(key, None)
     buf = io.BytesIO()
     with rasterio.open(buf, "w", **profile) as dst:
         dst.write(array.astype(np.int32), 1)
     buf.seek(0)
     return buf.read()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  SIDEBAR
@@ -427,6 +450,7 @@ with st.sidebar:
     k_val = st.slider("K", min_value=2, max_value=8, value=3, step=1,
                       label_visibility="collapsed")
     st.caption(f"K = {k_val} clusters")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STEP 1 — UPLOAD
@@ -451,7 +475,7 @@ if upload_mode == "Individual bands":
                 f'<div style="font-size:11px;font-weight:600;color:{bcolor};">{blabel}</div>',
                 unsafe_allow_html=True
             )
-            f = st.file_uploader(blabel, type=["tif","tiff"], key=f"ub_{bname}",
+            f = st.file_uploader(blabel, type=["tif", "tiff"], key=f"ub_{bname}",
                                  label_visibility="collapsed")
             if f:
                 arr, prof, meta = read_band_from_file(f, 1)
@@ -478,16 +502,20 @@ elif upload_mode == "RGB image (VARI only)":
         profile_ref  = prof
         st.info(f"RGB loaded — {meta['width']}×{meta['height']} px | R=1, G=2, B=3")
 
-# Persist bands to session_state whenever new uploads arrive
+# ── Persist bands — only reset computed results if the band set changes ───────
 if bands_loaded:
+    new_band_keys = set(bands_loaded.keys())
+    old_band_keys = set(st.session_state.bands.keys())
+    if new_band_keys != old_band_keys:
+        # Band set changed — clear stale results
+        st.session_state.computed_indices = {}
+        st.session_state.cluster_results  = {}
     st.session_state.bands       = bands_loaded
     st.session_state.profile_ref = profile_ref
-    # Clear computed indices and clusters when new bands are uploaded
-    st.session_state.computed_indices = {}
-    st.session_state.cluster_results  = {}
 
 bands       = st.session_state.bands
 profile_ref = st.session_state.get("profile_ref")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STEP 2 — SELECT & COMPUTE INDICES
@@ -504,7 +532,7 @@ avail = available_indices(bands)
 # Show availability chips
 chip_html = ""
 for idx_name, can_compute in avail.items():
-    needed = INDEX_BANDS[idx_name]
+    needed  = INDEX_BANDS[idx_name]
     missing = [b for b in needed if b not in bands]
     if can_compute:
         chip_html += f'<span class="chip-available">✔ {idx_name}</span>'
@@ -534,14 +562,21 @@ if not selected_indices:
     st.stop()
 
 if st.button("Compute selected indices", type="primary"):
-    prog = st.progress(0, text="Starting...")
+    prog  = st.progress(0, text="Starting...")
     total = len(selected_indices)
+
     for i, idx_name in enumerate(selected_indices):
-        prog.progress(
-            int((i / total) * 80),
-            text=f"Computing {idx_name} ({i+1}/{total})..."
+        prog.progress(int((i / total) * 80), text=f"Computing {idx_name} ({i+1}/{total})...")
+        bd  = st.session_state.bands
+        arr = _compute_index_cached(
+            idx_name,
+            r=bd.get("red"),
+            nir=bd.get("nir"),
+            g=bd.get("green"),
+            b=bd.get("blue"),
         )
-        compute_and_store(idx_name)
+        # Write directly into session_state — do NOT go via a local dict
+        st.session_state.computed_indices[idx_name] = arr
 
     prog.progress(85, text=f"Running K-Means (K={k_val})...")
     for idx_name in selected_indices:
@@ -549,8 +584,9 @@ if st.button("Compute selected indices", type="primary"):
         st.session_state.cluster_results[idx_name] = _run_kmeans_cached(arr, k_val)
 
     prog.progress(100, text="Done!")
-    prog.empty()
+    # Note: do NOT call prog.empty() before st.rerun() — let rerun clean up
     st.rerun()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STEP 2 RESULTS — show all computed indices
@@ -565,9 +601,9 @@ if computed:
         valid_vals = idx_arr[np.isfinite(idx_arr)]
         with st.expander(f"{idx_name} — {INDEX_DESC[idx_name]}", expanded=True):
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric(f"Max",   f"{np.nanmax(valid_vals):.4f}")
-            m2.metric(f"Mean",  f"{np.nanmean(valid_vals):.4f}")
-            m3.metric(f"Min",   f"{np.nanmin(valid_vals):.4f}")
+            m1.metric("Max",     f"{np.nanmax(valid_vals):.4f}")
+            m2.metric("Mean",    f"{np.nanmean(valid_vals):.4f}")
+            m3.metric("Min",     f"{np.nanmin(valid_vals):.4f}")
             m4.metric("Valid px", f"{len(valid_vals):,}")
 
             t1, t2 = st.tabs([f"{idx_name} Map", "Cluster Map"])
@@ -633,6 +669,7 @@ if computed:
                     )
             col_i += 1
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  STEP 3 — FUSION ANALYSIS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -643,7 +680,6 @@ st.markdown("---")
 st.markdown("## Step 3 — Fusion analysis (optional)")
 st.caption("Combines two indices to detect conditions single indices cannot reveal.")
 
-# Evaluate which fusions are available, partially available, or unavailable
 fusion_status = {}
 for fname, (i1, i2) in FUSION_REQUIRES.items():
     has_i1 = i1 in computed
@@ -653,7 +689,7 @@ for fname, (i1, i2) in FUSION_REQUIRES.items():
     if has_i1 and has_i2:
         fusion_status[fname] = "ready"
     elif can_i1 and can_i2:
-        fusion_status[fname] = "computable"   # bands exist, just not computed yet
+        fusion_status[fname] = "computable"
     else:
         missing_bands = []
         for idx in [i1, i2]:
@@ -661,7 +697,6 @@ for fname, (i1, i2) in FUSION_REQUIRES.items():
                 missing_bands += [b for b in INDEX_BANDS[idx] if b not in bands]
         fusion_status[fname] = ("missing_bands", list(set(missing_bands)))
 
-# Display fusion availability
 for fname, status in fusion_status.items():
     i1, i2 = FUSION_REQUIRES[fname]
     if status == "ready":
@@ -684,7 +719,6 @@ for fname, status in fusion_status.items():
 
 st.markdown("")
 
-# On-demand compute buttons for "computable" fusions
 for fname, status in fusion_status.items():
     if status == "computable":
         i1, i2 = FUSION_REQUIRES[fname]
@@ -693,13 +727,19 @@ for fname, status in fusion_status.items():
             if st.button(f"➕ Compute {idx_needed} (required for {fname})",
                          key=f"ondemand_{fname}_{idx_needed}"):
                 with st.spinner(f"Computing {idx_needed}..."):
-                    compute_and_store(idx_needed)
-                    arr = st.session_state.computed_indices[idx_needed]
-                    st.session_state.cluster_results[idx_needed] = _run_kmeans_cached(arr, k_val)
+                    bd  = st.session_state.bands
+                    arr = _compute_index_cached(
+                        idx_needed,
+                        r=bd.get("red"),
+                        nir=bd.get("nir"),
+                        g=bd.get("green"),
+                        b=bd.get("blue"),
+                    )
+                    st.session_state.computed_indices[idx_needed] = arr
+                    st.session_state.cluster_results[idx_needed]  = _run_kmeans_cached(arr, k_val)
                 st.success(f"{idx_needed} computed and stored.")
                 st.rerun()
 
-# Fusion mode selector — only ready fusions
 ready_fusions = [f for f, s in fusion_status.items() if s == "ready"]
 
 if not ready_fusions:
@@ -721,7 +761,7 @@ i1, i2 = FUSION_REQUIRES[fusion_mode]
 arr1    = st.session_state.computed_indices[i1]
 arr2    = st.session_state.computed_indices[i2]
 
-# ── (A) Water Stress ─────────────────────────────────────────────────────────
+# ── (A) Water Stress ──────────────────────────────────────────────────────────
 if fusion_mode == "NDVI + NDWI — Water stress":
     with st.expander("Adjust thresholds", expanded=False):
         fc1, fc2 = st.columns(2)
