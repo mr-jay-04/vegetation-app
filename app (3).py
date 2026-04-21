@@ -250,20 +250,18 @@ def make_index_fig(index_array, index_name):
     hovertemplate = f"<b>{index_name}: %{{z:.4f}}</b><br>Pixel: (%{{x}}, %{{y}})<extra></extra>"
     
     if index_name == "NDVI":
-        # 5 Discrete Bands: <=-0.6, -0.6 to -0.2, -0.2 to 0.2, 0.2 to 0.6, >0.6
         cscale = [
-            [0.0, "#D7191C"], [0.2, "#D7191C"], # Red
-            [0.2, "#FDAE61"], [0.4, "#FDAE61"], # Orange
-            [0.4, "#FFFFBF"], [0.6, "#FFFFBF"], # Yellow
-            [0.6, "#A6D96A"], [0.8, "#A6D96A"], # Light Green
-            [0.8, "#1A9641"], [1.0, "#1A9641"]  # Dark Green
+            [0.0, "#D7191C"], [0.2, "#D7191C"],
+            [0.2, "#FDAE61"], [0.4, "#FDAE61"],
+            [0.4, "#FFFFBF"], [0.6, "#FFFFBF"],
+            [0.6, "#A6D96A"], [0.8, "#A6D96A"],
+            [0.8, "#1A9641"], [1.0, "#1A9641"]
         ]
         zmin, zmax = -1.0, 1.0
         tickvals = [-0.8, -0.4, 0.0, 0.4, 0.8]
         ticktext = ["<= -0.6", "-0.6 to -0.2", "-0.2 to 0.2", "0.2 to 0.6", "> 0.6"]
         
     elif index_name == "SAVI":
-        # 5 Discrete Bands of Green
         cscale = [
             [0.0, "#edf8e9"], [0.2, "#edf8e9"],
             [0.2, "#bae4b3"], [0.4, "#bae4b3"],
@@ -276,40 +274,35 @@ def make_index_fig(index_array, index_name):
         ticktext = ["<= 0.2", "0.2 to 0.4", "0.4 to 0.6", "0.6 to 0.8", "> 0.8"]
 
     elif index_name == "NDWI":
-        # 3 Discrete Bands: Dry/Veg, Moist, Water
         cscale = [
-            [0.00, "#8B5E3C"], [0.33, "#8B5E3C"], # Brown (Veg/Dry)
-            [0.33, "#f4f4f4"], [0.66, "#f4f4f4"], # White/Grey (Moist)
-            [0.66, "#2980B9"], [1.00, "#2980B9"]  # Blue (Water)
+            [0.00, "#8B5E3C"], [0.33, "#8B5E3C"],
+            [0.33, "#f4f4f4"], [0.66, "#f4f4f4"],
+            [0.66, "#2980B9"], [1.00, "#2980B9"]
         ]
         zmin, zmax = -1.0, 1.0
-        # Position the ticks in the middle of each of the 3 blocks
         tickvals = [-0.66, 0.0, 0.66]
         ticktext = ["Dry/Veg (< -0.3)", "Moist (-0.3 to 0.3)", "Water (> 0.3)"]
         
     elif index_name == "VARI":
-        # 4 Discrete Bands for visible greenness
         cscale = [
-            [0.00, "#d73027"], [0.25, "#d73027"], # Red (Non-veg)
-            [0.25, "#fdae61"], [0.50, "#fdae61"], # Orange (Sparse)
-            [0.50, "#a6d96a"], [0.75, "#a6d96a"], # Light Green (Moderate)
-            [0.75, "#1a9850"], [1.00, "#1a9850"]  # Dark Green (Dense)
+            [0.00, "#d73027"], [0.25, "#d73027"],
+            [0.25, "#fdae61"], [0.50, "#fdae61"],
+            [0.50, "#a6d96a"], [0.75, "#a6d96a"],
+            [0.75, "#1a9850"], [1.00, "#1a9850"]
         ]
         zmin, zmax = -0.5, 0.5
-        # Position the ticks in the middle of each of the 4 blocks
         tickvals = [-0.375, -0.125, 0.125, 0.375]
         ticktext = ["<= -0.25", "-0.25 to 0.0", "0.0 to 0.25", "> 0.25"]
 
     else:
-        # Fallback for any unexpected indices
         cscale = "RdYlGn"
         zmin, zmax = -0.5, 0.5
         tickvals, ticktext = None, None
 
-    # Build the colorbar dictionary dynamically
     cbar_dict = dict(title=dict(text=index_name, side="right"), thickness=14, len=0.9)
     if tickvals and ticktext:
-        cbar_dict.update(tickvals=tickvals, ticktext=ticktext)
+        # Added tickmode="array" to force Plotly to use the custom labels
+        cbar_dict.update(tickmode="array", tickvals=tickvals, ticktext=ticktext)
 
     heatmap_kwargs = dict(
         z=ds, colorscale=cscale, zmin=zmin, zmax=zmax,
@@ -322,7 +315,6 @@ def make_index_fig(index_array, index_name):
     fig = go.Figure(go.Heatmap(**heatmap_kwargs, hovertemplate=hovertemplate))
     fig.update_layout(**_base_layout())
     return fig
-
 
 @st.cache_data(show_spinner=False)
 def make_cluster_fig(cluster_array, k):
@@ -346,21 +338,30 @@ def make_water_stress_fig(zone_array, ndvi_ds, ndwi_ds):
     ds[ds == -1] = np.nan
     ds_ndvi = downsample(ndvi_ds)
     ds_ndwi = downsample(ndwi_ds)
+    
     zlabels = np.full(ds.shape, "NoData", dtype=object)
     for zid, (label, _) in WATER_STRESS_ZONES.items():
         zlabels[ds == zid] = label
+        
+    # Safely mapped blocks to trap the integers 0, 1, 2, 3 without bleeding
     cscale = [
-        [0.00, WATER_STRESS_ZONES[0][1]], [0.33, WATER_STRESS_ZONES[0][1]],
-        [0.33, WATER_STRESS_ZONES[1][1]], [0.66, WATER_STRESS_ZONES[1][1]],
-        [0.66, WATER_STRESS_ZONES[2][1]], [0.99, WATER_STRESS_ZONES[2][1]],
-        [0.99, WATER_STRESS_ZONES[3][1]], [1.00, WATER_STRESS_ZONES[3][1]],
+        [0.00, WATER_STRESS_ZONES[0][1]], [0.25, WATER_STRESS_ZONES[0][1]],
+        [0.25, WATER_STRESS_ZONES[1][1]], [0.50, WATER_STRESS_ZONES[1][1]],
+        [0.50, WATER_STRESS_ZONES[2][1]], [0.75, WATER_STRESS_ZONES[2][1]],
+        [0.75, WATER_STRESS_ZONES[3][1]], [1.00, WATER_STRESS_ZONES[3][1]],
     ]
+    
     custom = np.stack([zlabels, ds_ndvi, ds_ndwi], axis=-1)
+    
     fig = go.Figure(go.Heatmap(
         z=ds, colorscale=cscale, zmin=0, zmax=3, customdata=custom,
         hovertemplate="<b>%{customdata[0]}</b><br>NDVI: %{customdata[1]:.4f}<br>NDWI: %{customdata[2]:.4f}<br>Pixel: (%{x}, %{y})<extra></extra>",
-        colorbar=dict(title=dict(text="Zone", side="right"), thickness=14,
-                      tickvals=[0,1,2,3], ticktext=[WATER_STRESS_ZONES[i][0] for i in range(4)], len=0.9),
+        colorbar=dict(
+            title=dict(text="Zone", side="right"), thickness=14, len=0.9,
+            tickmode="array", # Forces custom text
+            tickvals=[0, 1, 2, 3], 
+            ticktext=[WATER_STRESS_ZONES[i][0] for i in range(4)]
+        ),
     ))
     fig.update_layout(**_base_layout())
     return fig
@@ -371,16 +372,31 @@ def make_soil_interference_fig(ndvi_array, diff_array, unreliable_mask):
     ds_ndvi       = downsample(ndvi_array)
     ds_diff       = downsample(diff_array)
     ds_unreliable = downsample(unreliable_mask.astype(np.float32))
-    cols   = ["#1a6fa8","#c8a45e","#f5c518","#8bc34a","#4caf50","#2e7d32","#1b5e20"]
-    cscale = [[i/(len(cols)-1), c] for i, c in enumerate(cols)]
+    
+    # Use the 5-band QGIS colorscale for the base NDVI layer
+    cscale = [
+        [0.0, "#D7191C"], [0.2, "#D7191C"],
+        [0.2, "#FDAE61"], [0.4, "#FDAE61"],
+        [0.4, "#FFFFBF"], [0.6, "#FFFFBF"],
+        [0.6, "#A6D96A"], [0.8, "#A6D96A"],
+        [0.8, "#1A9641"], [1.0, "#1A9641"]
+    ]
+    
     reliability = np.where(ds_unreliable > 0.5, "Unreliable (soil interference)", "Reliable")
     custom = np.stack([reliability, ds_diff], axis=-1)
+    
     fig = go.Figure()
     fig.add_trace(go.Heatmap(
-        z=ds_ndvi, colorscale=cscale, zmin=-1, zmax=1, customdata=custom,
+        z=ds_ndvi, colorscale=cscale, zmin=-1.0, zmax=1.0, customdata=custom,
         hovertemplate="<b>NDVI: %{z:.4f}</b><br>Reliability: %{customdata[0]}<br>|NDVI−SAVI|: %{customdata[1]:.4f}<br>Pixel: (%{x}, %{y})<extra></extra>",
-        colorbar=dict(title=dict(text="NDVI", side="right"), thickness=14, len=0.9, x=1.02),
+        colorbar=dict(
+            title=dict(text="NDVI", side="right"), thickness=14, len=0.9, x=1.02,
+            tickmode="array",
+            tickvals=[-0.8, -0.4, 0.0, 0.4, 0.8],
+            ticktext=["<= -0.6", "-0.6 to -0.2", "-0.2 to 0.2", "0.2 to 0.6", "> 0.6"]
+        ),
     ))
+    
     try:
         import base64
         from PIL import Image as PILImage
@@ -402,9 +418,9 @@ def make_soil_interference_fig(ndvi_array, diff_array, unreliable_mask):
         fig.update_yaxes(range=[h, 0])
     except ImportError:
         pass
+        
     fig.update_layout(**_base_layout())
     return fig
-
 
 @st.cache_data(show_spinner=False)
 def make_hidden_stress_fig(zone_array, ndvi_ds, vari_ds):
