@@ -329,7 +329,6 @@ def make_index_fig(index_array, index_name):
 
     cbar_dict = dict(title=dict(text=index_name, side="right"), thickness=14, len=0.9)
     if tickvals and ticktext:
-        # Added tickmode="array" to force Plotly to use the custom labels
         cbar_dict.update(tickmode="array", tickvals=tickvals, ticktext=ticktext)
 
     heatmap_kwargs = dict(
@@ -353,8 +352,14 @@ def make_cluster_fig(cluster_array, k):
     fig = go.Figure(go.Heatmap(
         z=ds, colorscale=cscale, zmin=0, zmax=k-1,
         hovertemplate="<b>Cluster: %{z:.0f}</b><br>Pixel: (%{x}, %{y})<extra></extra>",
-        colorbar=dict(title=dict(text="Cluster", side="right"), thickness=14,
-                      tickvals=list(range(k)), ticktext=[f"Cluster {i}" for i in range(k)], len=0.9),
+        colorbar=dict(
+            title=dict(text="Cluster", side="right"), 
+            thickness=14,
+            tickmode="array", 
+            tickvals=list(range(k)), 
+            ticktext=[f"Cluster {i}" for i in range(k)], 
+            len=0.9
+        ),
     ))
     fig.update_layout(**_base_layout())
     return fig
@@ -371,7 +376,6 @@ def make_water_stress_fig(zone_array, ndvi_ds, ndwi_ds):
     for zid, (label, _) in WATER_STRESS_ZONES.items():
         zlabels[ds == zid] = label
         
-    # Safely mapped blocks to trap the integers 0, 1, 2, 3 without bleeding
     cscale = [
         [0.00, WATER_STRESS_ZONES[0][1]], [0.25, WATER_STRESS_ZONES[0][1]],
         [0.25, WATER_STRESS_ZONES[1][1]], [0.50, WATER_STRESS_ZONES[1][1]],
@@ -386,7 +390,7 @@ def make_water_stress_fig(zone_array, ndvi_ds, ndwi_ds):
         hovertemplate="<b>%{customdata[0]}</b><br>NDVI: %{customdata[1]:.4f}<br>NDWI: %{customdata[2]:.4f}<br>Pixel: (%{x}, %{y})<extra></extra>",
         colorbar=dict(
             title=dict(text="Zone", side="right"), thickness=14, len=0.9,
-            tickmode="array", # Forces custom text
+            tickmode="array",
             tickvals=[0, 1, 2, 3], 
             ticktext=[WATER_STRESS_ZONES[i][0] for i in range(4)]
         ),
@@ -401,7 +405,6 @@ def make_soil_interference_fig(ndvi_array, diff_array, unreliable_mask):
     ds_diff       = downsample(diff_array)
     ds_unreliable = downsample(unreliable_mask.astype(np.float32))
     
-    # Use the 5-band QGIS colorscale for the base NDVI layer
     cscale = [
         [0.0, "#D7191C"], [0.2, "#D7191C"],
         [0.2, "#FDAE61"], [0.4, "#FDAE61"],
@@ -468,8 +471,14 @@ def make_hidden_stress_fig(zone_array, ndvi_ds, vari_ds):
     fig = go.Figure(go.Heatmap(
         z=ds, colorscale=cscale, zmin=0, zmax=2, customdata=custom,
         hovertemplate="<b>%{customdata[0]}</b><br>NDVI: %{customdata[1]:.4f}<br>VARI: %{customdata[2]:.4f}<br>Pixel: (%{x}, %{y})<extra></extra>",
-        colorbar=dict(title=dict(text="Zone", side="right"), thickness=14,
-                      tickvals=[0,1,2], ticktext=[HIDDEN_STRESS_ZONES[i][0] for i in range(3)], len=0.9),
+        colorbar=dict(
+            title=dict(text="Zone", side="right"), 
+            thickness=14,
+            tickmode="array",
+            tickvals=[0,1,2], 
+            ticktext=[HIDDEN_STRESS_ZONES[i][0] for i in range(3)], 
+            len=0.9
+        ),
     ))
     fig.update_layout(**_base_layout())
     return fig
@@ -516,8 +525,9 @@ def array_to_geotiff_bytes(array, profile):
     profile = profile.copy()
     profile.update(dtype=rasterio.float32, count=1, nodata=-9999,
                    compress="lzw", driver="GTiff")
-    for key in ["blockxsize", "blockysize", "tiled"]:
+    for key in ["blockxsize", "blockysize", "tiled", "photometric", "interleave"]:
         profile.pop(key, None)
+        
     buf = io.BytesIO()
     with rasterio.open(buf, "w", **profile) as dst:
         dst.write(np.where(np.isfinite(array), array, -9999).astype(np.float32), 1)
@@ -529,8 +539,9 @@ def cluster_to_geotiff_bytes(array, profile):
     profile = profile.copy()
     profile.update(dtype=rasterio.int32, count=1, nodata=-9999,
                    compress="lzw", driver="GTiff")
-    for key in ["blockxsize", "blockysize", "tiled"]:
+    for key in ["blockxsize", "blockysize", "tiled", "photometric", "interleave"]:
         profile.pop(key, None)
+        
     buf = io.BytesIO()
     with rasterio.open(buf, "w", **profile) as dst:
         dst.write(array.astype(np.int32), 1)
@@ -713,7 +724,6 @@ if computed:
                     key=f"index_fig_{idx_name}",
                 )
                 
-                # Automatically render the HTML colored boxes below the map for EVERY index
                 if idx_name in INDEX_LEGENDS:
                     st.markdown(f"##### {idx_name} scale")
                     legend_data = INDEX_LEGENDS[idx_name]
@@ -729,7 +739,6 @@ if computed:
             with t2:
                 cl_arr = st.session_state.cluster_results.get(idx_name)
                 if cl_arr is not None:
-                    # ✅ unique key per index
                     st.plotly_chart(
                         make_cluster_fig(cl_arr, k_val),
                         width="stretch",
@@ -752,37 +761,6 @@ if computed:
                                 unsafe_allow_html=True
                             )
 
-    # ── EXPORT ────────────────────────────────────────────────────────────────────
-def array_to_geotiff_bytes(array, profile):
-    profile = profile.copy()
-    profile.update(dtype=rasterio.float32, count=1, nodata=-9999,
-                   compress="lzw", driver="GTiff")
-    
-    # Add "interleave" and "photometric" to the keys being stripped
-    for key in ["blockxsize", "blockysize", "tiled", "photometric", "interleave"]:
-        profile.pop(key, None)
-        
-    buf = io.BytesIO()
-    with rasterio.open(buf, "w", **profile) as dst:
-        dst.write(np.where(np.isfinite(array), array, -9999).astype(np.float32), 1)
-    buf.seek(0)
-    return buf.read()
-
-
-def cluster_to_geotiff_bytes(array, profile):
-    profile = profile.copy()
-    profile.update(dtype=rasterio.int32, count=1, nodata=-9999,
-                   compress="lzw", driver="GTiff")
-                   
-    # Add "interleave" and "photometric" to the keys being stripped
-    for key in ["blockxsize", "blockysize", "tiled", "photometric", "interleave"]:
-        profile.pop(key, None)
-        
-    buf = io.BytesIO()
-    with rasterio.open(buf, "w", **profile) as dst:
-        dst.write(array.astype(np.int32), 1)
-    buf.seek(0)
-    return buf.read()
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STEP 3 — FUSION ANALYSIS
@@ -887,7 +865,6 @@ if fusion_mode == "NDVI + NDWI — Water stress":
                                help="Above = sufficient water")
 
     zones = compute_water_stress_zones(arr1, arr2, ndvi_t, ndwi_t)
-    # ✅ unique key
     st.plotly_chart(
         make_water_stress_fig(zones, arr1, arr2),
         width="stretch",
@@ -907,7 +884,6 @@ elif fusion_mode == "NDVI + SAVI — Soil interference":
         pct_thresh = st.slider("Flag top N% as unreliable", 50, 95, 75, 5)
 
     diff_arr, unreliable, threshold = compute_soil_interference(arr1, arr2, pct_thresh)
-    # ✅ unique key
     st.plotly_chart(
         make_soil_interference_fig(arr1, diff_arr, unreliable),
         width="stretch",
@@ -938,7 +914,6 @@ elif fusion_mode == "NDVI + VARI — Hidden stress":
             ndvi_th = st.slider("NDVI threshold (NIR response)", 0.1, 0.6, 0.3, 0.05)
 
     hs_zones = compute_hidden_stress(arr1, arr2, vari_t, ndvi_th)
-    # ✅ unique key
     st.plotly_chart(
         make_hidden_stress_fig(hs_zones, arr1, arr2),
         width="stretch",
