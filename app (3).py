@@ -709,7 +709,7 @@ if computed:
             with t1:
                 st.plotly_chart(
                     make_index_fig(idx_arr, idx_name),
-                    use_container_width=True,
+                    width="stretch",
                     key=f"index_fig_{idx_name}",
                 )
                 
@@ -732,7 +732,7 @@ if computed:
                     # ✅ unique key per index
                     st.plotly_chart(
                         make_cluster_fig(cl_arr, k_val),
-                        use_container_width=True,
+                        width="stretch",
                         key=f"cluster_fig_{idx_name}",
                     )
                     st.markdown("##### Cluster distribution")
@@ -890,7 +890,7 @@ if fusion_mode == "NDVI + NDWI — Water stress":
     # ✅ unique key
     st.plotly_chart(
         make_water_stress_fig(zones, arr1, arr2),
-        use_container_width=True,
+        width="stretch",
         key="fusion_water_stress",
     )
     st.markdown("##### Zone breakdown")
@@ -910,7 +910,7 @@ elif fusion_mode == "NDVI + SAVI — Soil interference":
     # ✅ unique key
     st.plotly_chart(
         make_soil_interference_fig(arr1, diff_arr, unreliable),
-        use_container_width=True,
+        width="stretch",
         key="fusion_soil_interference",
     )
 
@@ -941,7 +941,7 @@ elif fusion_mode == "NDVI + VARI — Hidden stress":
     # ✅ unique key
     st.plotly_chart(
         make_hidden_stress_fig(hs_zones, arr1, arr2),
-        use_container_width=True,
+        width="stretch",
         key="fusion_hidden_stress",
     )
     st.markdown("##### Zone breakdown")
