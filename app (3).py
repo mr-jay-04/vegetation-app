@@ -106,6 +106,34 @@ HIDDEN_STRESS_ZONES = {
     2: ("Confirmed healthy", "#27AE60"),
 }
 
+INDEX_LEGENDS = {
+    "NDVI": [
+        ("<= -0.6", "#D7191C", "#FFF"),
+        ("-0.6 to -0.2", "#FDAE61", "#000"),
+        ("-0.2 to 0.2", "#FFFFBF", "#000"),
+        ("0.2 to 0.6", "#A6D96A", "#000"),
+        ("> 0.6", "#1A9641", "#FFF")
+    ],
+    "SAVI": [
+        ("<= 0.2", "#edf8e9", "#000"),
+        ("0.2 to 0.4", "#bae4b3", "#000"),
+        ("0.4 to 0.6", "#74c476", "#000"),
+        ("0.6 to 0.8", "#31a354", "#FFF"),
+        ("> 0.8", "#006d2c", "#FFF")
+    ],
+    "NDWI": [
+        ("Dry/Veg", "#8B5E3C", "#FFF"),
+        ("Moist", "#f4f4f4", "#000"),
+        ("Water", "#2980B9", "#FFF")
+    ],
+    "VARI": [
+        ("<= -0.25", "#d73027", "#FFF"),
+        ("-0.25 to 0.0", "#fdae61", "#000"),
+        ("0.0 to 0.25", "#a6d96a", "#000"),
+        ("> 0.25", "#1a9850", "#FFF")
+    ]
+}
+
 # ── SESSION STATE INIT ────────────────────────────────────────────────────────
 _state_defaults = {
     "bands":            {},
@@ -679,21 +707,23 @@ if computed:
 
             t1, t2 = st.tabs([f"{idx_name} Map", "Cluster Map"])
             with t1:
-                # ✅ unique key per index
                 st.plotly_chart(
                     make_index_fig(idx_arr, idx_name),
                     use_container_width=True,
                     key=f"index_fig_{idx_name}",
                 )
-                if idx_name == "NDVI":
-                    st.markdown("##### Health scale")
-                    hcols = st.columns(len(HEALTH_THRESHOLDS))
-                    for hi, (lo, h, label, bg, tc) in enumerate(HEALTH_THRESHOLDS):
+                
+                # Automatically render the HTML colored boxes below the map for EVERY index
+                if idx_name in INDEX_LEGENDS:
+                    st.markdown(f"##### {idx_name} scale")
+                    legend_data = INDEX_LEGENDS[idx_name]
+                    hcols = st.columns(len(legend_data))
+                    for hi, (label, bg, tc) in enumerate(legend_data):
                         with hcols[hi]:
                             st.markdown(
-                                f'<div style="background:{bg};color:{tc};padding:5px 6px;border-radius:6px;'
-                                f'font-size:10px;text-align:center;font-weight:600;">{label}<br>'
-                                f'<span style="font-weight:400;">{lo} to {h}</span></div>',
+                                f'<div style="background:{bg};color:{tc};padding:6px;border-radius:6px;'
+                                f'font-size:11px;text-align:center;font-weight:600;border:1px solid #ccc;">'
+                                f'{label}</div>',
                                 unsafe_allow_html=True
                             )
             with t2:
