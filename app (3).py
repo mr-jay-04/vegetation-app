@@ -113,7 +113,7 @@ _state_defaults = {
     "computed_indices": {},
     "cluster_results":  {},
     "upload_mode":      None,
-    "band_fingerprint": None,   # tracks when bands actually change
+    "band_fingerprint": None,
 }
 for k, v in _state_defaults.items():
     if k not in st.session_state:
@@ -121,7 +121,6 @@ for k, v in _state_defaults.items():
 
 # ── CORE HELPERS ──────────────────────────────────────────────────────────────
 def read_band_bytes(file_bytes: bytes, band_num: int = 1):
-    """Read a single band from GeoTIFF bytes. No cache — bytes aren't safely hashable."""
     with MemoryFile(file_bytes) as memfile:
         with memfile.open() as src:
             data    = src.read(band_num).astype(np.float32)
@@ -155,7 +154,6 @@ def _compute_index_cached(name, r=None, nir=None, g=None, b=None):
 
 
 def compute_and_store(name: str):
-    """Compute a single index from stored bands and save to session_state."""
     bd  = st.session_state.bands
     arr = _compute_index_cached(
         name,
@@ -484,7 +482,6 @@ if upload_mode == "Individual bands":
                     profile_ref = prof
                 st.caption(f"{meta['width']}×{meta['height']} px")
 
-    # shape check
     shapes = list({v.shape for v in bands_loaded.values()})
     if len(shapes) > 1:
         st.error(f"Band dimensions don't match: {shapes}. All bands must be the same size.")
@@ -502,12 +499,11 @@ elif upload_mode == "RGB image (VARI only)":
         profile_ref  = prof
         st.info(f"RGB loaded — {meta['width']}×{meta['height']} px | R=1, G=2, B=3")
 
-# ── Persist bands — only reset computed results if the band set changes ───────
+# ── Persist bands ─────────────────────────────────────────────────────────────
 if bands_loaded:
     new_band_keys = set(bands_loaded.keys())
     old_band_keys = set(st.session_state.bands.keys())
     if new_band_keys != old_band_keys:
-        # Band set changed — clear stale results
         st.session_state.computed_indices = {}
         st.session_state.cluster_results  = {}
     st.session_state.bands       = bands_loaded
@@ -529,7 +525,6 @@ st.markdown("## Step 2 — Select indices to compute")
 
 avail = available_indices(bands)
 
-# Show availability chips
 chip_html = ""
 for idx_name, can_compute in avail.items():
     needed  = INDEX_BANDS[idx_name]
@@ -575,7 +570,6 @@ if st.button("Compute selected indices", type="primary"):
             g=bd.get("green"),
             b=bd.get("blue"),
         )
-        # Write directly into session_state — do NOT go via a local dict
         st.session_state.computed_indices[idx_name] = arr
 
     prog.progress(85, text=f"Running K-Means (K={k_val})...")
@@ -584,12 +578,11 @@ if st.button("Compute selected indices", type="primary"):
         st.session_state.cluster_results[idx_name] = _run_kmeans_cached(arr, k_val)
 
     prog.progress(100, text="Done!")
-    # Note: do NOT call prog.empty() before st.rerun() — let rerun clean up
     st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  STEP 2 RESULTS — show all computed indices
+#  STEP 2 RESULTS
 # ─────────────────────────────────────────────────────────────────────────────
 computed = st.session_state.computed_indices
 
@@ -601,14 +594,19 @@ if computed:
         valid_vals = idx_arr[np.isfinite(idx_arr)]
         with st.expander(f"{idx_name} — {INDEX_DESC[idx_name]}", expanded=True):
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Max",     f"{np.nanmax(valid_vals):.4f}")
-            m2.metric("Mean",    f"{np.nanmean(valid_vals):.4f}")
-            m3.metric("Min",     f"{np.nanmin(valid_vals):.4f}")
+            m1.metric("Max",      f"{np.nanmax(valid_vals):.4f}")
+            m2.metric("Mean",     f"{np.nanmean(valid_vals):.4f}")
+            m3.metric("Min",      f"{np.nanmin(valid_vals):.4f}")
             m4.metric("Valid px", f"{len(valid_vals):,}")
 
             t1, t2 = st.tabs([f"{idx_name} Map", "Cluster Map"])
             with t1:
-                st.plotly_chart(make_index_fig(idx_arr, idx_name), use_container_width=True)
+                # ✅ unique key per index
+                st.plotly_chart(
+                    make_index_fig(idx_arr, idx_name),
+                    use_container_width=True,
+                    key=f"index_fig_{idx_name}",
+                )
                 if idx_name == "NDVI":
                     st.markdown("##### Health scale")
                     hcols = st.columns(len(HEALTH_THRESHOLDS))
@@ -623,7 +621,12 @@ if computed:
             with t2:
                 cl_arr = st.session_state.cluster_results.get(idx_name)
                 if cl_arr is not None:
-                    st.plotly_chart(make_cluster_fig(cl_arr, k_val), use_container_width=True)
+                    # ✅ unique key per index
+                    st.plotly_chart(
+                        make_cluster_fig(cl_arr, k_val),
+                        use_container_width=True,
+                        key=f"cluster_fig_{idx_name}",
+                    )
                     st.markdown("##### Cluster distribution")
                     dcols  = st.columns(k_val)
                     colors = ["#1565c0","#2e7d32","#ef6c00","#6a1b9a","#c62828","#00695c","#f9a825","#4e342e"]
@@ -655,6 +658,7 @@ if computed:
                     file_name=f"{idx_name.lower()}_output.tif",
                     mime="image/tiff",
                     use_container_width=True,
+                    key=f"dl_index_{idx_name}",
                 )
             col_i += 1
             cl_arr = st.session_state.cluster_results.get(idx_name)
@@ -666,6 +670,7 @@ if computed:
                         file_name=f"{idx_name.lower()}_clusters.tif",
                         mime="image/tiff",
                         use_container_width=True,
+                        key=f"dl_cluster_{idx_name}",
                     )
             col_i += 1
 
@@ -773,7 +778,12 @@ if fusion_mode == "NDVI + NDWI — Water stress":
                                help="Above = sufficient water")
 
     zones = compute_water_stress_zones(arr1, arr2, ndvi_t, ndwi_t)
-    st.plotly_chart(make_water_stress_fig(zones, arr1, arr2), use_container_width=True)
+    # ✅ unique key
+    st.plotly_chart(
+        make_water_stress_fig(zones, arr1, arr2),
+        use_container_width=True,
+        key="fusion_water_stress",
+    )
     st.markdown("##### Zone breakdown")
     st.markdown(zone_stats_html(zones, WATER_STRESS_ZONES), unsafe_allow_html=True)
     st.markdown("---")
@@ -788,8 +798,12 @@ elif fusion_mode == "NDVI + SAVI — Soil interference":
         pct_thresh = st.slider("Flag top N% as unreliable", 50, 95, 75, 5)
 
     diff_arr, unreliable, threshold = compute_soil_interference(arr1, arr2, pct_thresh)
-    st.plotly_chart(make_soil_interference_fig(arr1, diff_arr, unreliable),
-                    use_container_width=True)
+    # ✅ unique key
+    st.plotly_chart(
+        make_soil_interference_fig(arr1, diff_arr, unreliable),
+        use_container_width=True,
+        key="fusion_soil_interference",
+    )
 
     total_v = int(np.sum(np.isfinite(diff_arr)))
     u_ct    = int(np.sum(unreliable))
@@ -815,7 +829,12 @@ elif fusion_mode == "NDVI + VARI — Hidden stress":
             ndvi_th = st.slider("NDVI threshold (NIR response)", 0.1, 0.6, 0.3, 0.05)
 
     hs_zones = compute_hidden_stress(arr1, arr2, vari_t, ndvi_th)
-    st.plotly_chart(make_hidden_stress_fig(hs_zones, arr1, arr2), use_container_width=True)
+    # ✅ unique key
+    st.plotly_chart(
+        make_hidden_stress_fig(hs_zones, arr1, arr2),
+        use_container_width=True,
+        key="fusion_hidden_stress",
+    )
     st.markdown("##### Zone breakdown")
     st.markdown(zone_stats_html(hs_zones, HIDDEN_STRESS_ZONES), unsafe_allow_html=True)
 
