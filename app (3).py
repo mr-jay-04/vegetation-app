@@ -644,36 +644,37 @@ if computed:
                                 unsafe_allow_html=True
                             )
 
-    # ── Export ────────────────────────────────────────────────────────────────
-    if profile_ref:
-        st.markdown("---")
-        st.markdown("### Export")
-        exp_cols = st.columns(len(computed) * 2)
-        col_i = 0
-        for idx_name, idx_arr in computed.items():
-            with exp_cols[col_i]:
-                st.download_button(
-                    f"Download {idx_name} GeoTIFF",
-                    data=array_to_geotiff_bytes(idx_arr, profile_ref),
-                    file_name=f"{idx_name.lower()}_output.tif",
-                    mime="image/tiff",
-                    use_container_width=True,
-                    key=f"dl_index_{idx_name}",
-                )
-            col_i += 1
-            cl_arr = st.session_state.cluster_results.get(idx_name)
-            if cl_arr is not None:
-                with exp_cols[col_i]:
-                    st.download_button(
-                        f"Download {idx_name} clusters",
-                        data=cluster_to_geotiff_bytes(cl_arr, profile_ref),
-                        file_name=f"{idx_name.lower()}_clusters.tif",
-                        mime="image/tiff",
-                        use_container_width=True,
-                        key=f"dl_cluster_{idx_name}",
-                    )
-            col_i += 1
+    # ── EXPORT ────────────────────────────────────────────────────────────────────
+def array_to_geotiff_bytes(array, profile):
+    profile = profile.copy()
+    profile.update(dtype=rasterio.float32, count=1, nodata=-9999,
+                   compress="lzw", driver="GTiff")
+    
+    # Add "interleave" and "photometric" to the keys being stripped
+    for key in ["blockxsize", "blockysize", "tiled", "photometric", "interleave"]:
+        profile.pop(key, None)
+        
+    buf = io.BytesIO()
+    with rasterio.open(buf, "w", **profile) as dst:
+        dst.write(np.where(np.isfinite(array), array, -9999).astype(np.float32), 1)
+    buf.seek(0)
+    return buf.read()
 
+
+def cluster_to_geotiff_bytes(array, profile):
+    profile = profile.copy()
+    profile.update(dtype=rasterio.int32, count=1, nodata=-9999,
+                   compress="lzw", driver="GTiff")
+                   
+    # Add "interleave" and "photometric" to the keys being stripped
+    for key in ["blockxsize", "blockysize", "tiled", "photometric", "interleave"]:
+        profile.pop(key, None)
+        
+    buf = io.BytesIO()
+    with rasterio.open(buf, "w", **profile) as dst:
+        dst.write(array.astype(np.int32), 1)
+    buf.seek(0)
+    return buf.read()
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STEP 3 — FUSION ANALYSIS
