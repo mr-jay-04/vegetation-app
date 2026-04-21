@@ -94,10 +94,10 @@ HEALTH_THRESHOLDS = [
 ]
 
 WATER_STRESS_ZONES = {
-    0: ("Bare / Dry soil",       "#8B5E3C"),
-    1: ("Waterlogged",           "#2980B9"),
-    2: ("Water-stressed veg",    "#F39C12"),
-    3: ("Healthy vegetation",    "#27AE60"),
+    0: ("Bare / dry",         "#FFFF00"), # Yellow
+    1: ("Waterlogged/Soil",   "#00FFFF"), # Cyan
+    2: ("dense canopy",       "#FF0000"), # Red
+    3: ("Healthy",            "#00FF00"), # Green
 }
 
 HIDDEN_STRESS_ZONES = {
@@ -244,20 +244,82 @@ def _base_layout(height=480):
 
 @st.cache_data(show_spinner=False)
 def make_index_fig(index_array, index_name):
-    ds     = downsample(index_array)
-    health = vectorized_health_labels(ds)
+    ds = downsample(index_array)
+    
+    customdata = None
+    hovertemplate = f"<b>{index_name}: %{{z:.4f}}</b><br>Pixel: (%{{x}}, %{{y}})<extra></extra>"
+    
     if index_name == "NDVI":
-        cols   = ["#1a6fa8","#c8a45e","#f5c518","#8bc34a","#4caf50","#2e7d32","#1b5e20"]
-        cscale = [[i / (len(cols)-1), c] for i, c in enumerate(cols)]
+        # 5 Discrete Bands: <=-0.6, -0.6 to -0.2, -0.2 to 0.2, 0.2 to 0.6, >0.6
+        cscale = [
+            [0.0, "#D7191C"], [0.2, "#D7191C"], # Red
+            [0.2, "#FDAE61"], [0.4, "#FDAE61"], # Orange
+            [0.4, "#FFFFBF"], [0.6, "#FFFFBF"], # Yellow
+            [0.6, "#A6D96A"], [0.8, "#A6D96A"], # Light Green
+            [0.8, "#1A9641"], [1.0, "#1A9641"]  # Dark Green
+        ]
+        zmin, zmax = -1.0, 1.0
+        tickvals = [-0.8, -0.4, 0.0, 0.4, 0.8]
+        ticktext = ["<= -0.6", "-0.6 to -0.2", "-0.2 to 0.2", "0.2 to 0.6", "> 0.6"]
+        
+    elif index_name == "SAVI":
+        # 5 Discrete Bands of Green
+        cscale = [
+            [0.0, "#edf8e9"], [0.2, "#edf8e9"],
+            [0.2, "#bae4b3"], [0.4, "#bae4b3"],
+            [0.4, "#74c476"], [0.6, "#74c476"],
+            [0.6, "#31a354"], [0.8, "#31a354"],
+            [0.8, "#006d2c"], [1.0, "#006d2c"]
+        ]
+        zmin, zmax = 0.0, 1.0 
+        tickvals = [0.1, 0.3, 0.5, 0.7, 0.9]
+        ticktext = ["<= 0.2", "0.2 to 0.4", "0.4 to 0.6", "0.6 to 0.8", "> 0.8"]
+
+    elif index_name == "NDWI":
+        # 3 Discrete Bands: Dry/Veg, Moist, Water
+        cscale = [
+            [0.00, "#8B5E3C"], [0.33, "#8B5E3C"], # Brown (Veg/Dry)
+            [0.33, "#f4f4f4"], [0.66, "#f4f4f4"], # White/Grey (Moist)
+            [0.66, "#2980B9"], [1.00, "#2980B9"]  # Blue (Water)
+        ]
+        zmin, zmax = -1.0, 1.0
+        # Position the ticks in the middle of each of the 3 blocks
+        tickvals = [-0.66, 0.0, 0.66]
+        ticktext = ["Dry/Veg (< -0.3)", "Moist (-0.3 to 0.3)", "Water (> 0.3)"]
+        
+    elif index_name == "VARI":
+        # 4 Discrete Bands for visible greenness
+        cscale = [
+            [0.00, "#d73027"], [0.25, "#d73027"], # Red (Non-veg)
+            [0.25, "#fdae61"], [0.50, "#fdae61"], # Orange (Sparse)
+            [0.50, "#a6d96a"], [0.75, "#a6d96a"], # Light Green (Moderate)
+            [0.75, "#1a9850"], [1.00, "#1a9850"]  # Dark Green (Dense)
+        ]
+        zmin, zmax = -0.5, 0.5
+        # Position the ticks in the middle of each of the 4 blocks
+        tickvals = [-0.375, -0.125, 0.125, 0.375]
+        ticktext = ["<= -0.25", "-0.25 to 0.0", "0.0 to 0.25", "> 0.25"]
+
     else:
+        # Fallback for any unexpected indices
         cscale = "RdYlGn"
-    zmin, zmax = (-1, 1) if index_name in ("NDVI", "NDWI") else (-0.5, 0.5)
-    fig = go.Figure(go.Heatmap(
+        zmin, zmax = -0.5, 0.5
+        tickvals, ticktext = None, None
+
+    # Build the colorbar dictionary dynamically
+    cbar_dict = dict(title=dict(text=index_name, side="right"), thickness=14, len=0.9)
+    if tickvals and ticktext:
+        cbar_dict.update(tickvals=tickvals, ticktext=ticktext)
+
+    heatmap_kwargs = dict(
         z=ds, colorscale=cscale, zmin=zmin, zmax=zmax,
-        customdata=health,
-        hovertemplate=f"<b>{index_name}: %{{z:.4f}}</b><br>Health: %{{customdata}}<br>Pixel: (%{{x}}, %{{y}})<extra></extra>",
-        colorbar=dict(title=dict(text=index_name, side="right"), thickness=14, len=0.9),
-    ))
+        colorbar=cbar_dict
+    )
+    
+    if customdata is not None:
+        heatmap_kwargs["customdata"] = customdata
+        
+    fig = go.Figure(go.Heatmap(**heatmap_kwargs, hovertemplate=hovertemplate))
     fig.update_layout(**_base_layout())
     return fig
 
